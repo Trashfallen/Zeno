@@ -39,12 +39,33 @@ function gathered(pc, timeout = 4000) {
   });
 }
 
+// screenBitrates: с чего стартует оценка канала для трансляции. Без этого
+// WebRTC начинает с ~300 кбит/с и несколько секунд (а то и минуту) режет
+// кадры, пока разгонится.
+function screenBitrates(sec) {
+  const pts = [...sec.matchAll(/^a=rtpmap:(\d+) ([\w-]+)\//gm)]
+    .filter((m) => !/^(rtx|red|ulpfec|flexfec-03)$/i.test(m[2])).map((m) => m[1]);
+  const params = "x-google-start-bitrate=6000;x-google-min-bitrate=1500";
+  for (const pt of pts) {
+    const re = new RegExp("^a=fmtp:" + pt + " (.*?)\\r?$", "m");
+    if (re.test(sec)) {
+      sec = sec.replace(re, (all, p) => (p.includes("x-google-start-bitrate") ? all : "a=fmtp:" + pt + " " + p + ";" + params + "\r"));
+    } else {
+      sec = sec.replace(new RegExp("^(a=rtpmap:" + pt + " [^\\r\\n]*)", "m"), "$1\r\na=fmtp:" + pt + " " + params);
+    }
+  }
+  return sec;
+}
+
 // tuneSDP настраивает Opus по m-секциям: первая аудио - голос (моно, FEC,
-// битрейт из настроек), вторая - звук трансляции (стерео 128 кбит/с).
+// битрейт из настроек), вторая - звук трансляции (стерео 128 кбит/с);
+// вторая видео (экран) - стартовый битрейт.
 export function tuneSDP(sdp, voiceKbps) {
   const parts = sdp.split(/(?=^m=)/m);
   let audioIdx = 0;
+  let videoIdx = 0;
   return parts.map((sec) => {
+    if (sec.startsWith("m=video")) return videoIdx++ === 1 ? screenBitrates(sec) : sec;
     if (!sec.startsWith("m=audio")) return sec;
     const which = audioIdx++;
     const m = sec.match(/a=rtpmap:(\d+) opus\/48000/i);
@@ -279,7 +300,7 @@ export class Peer extends EventTarget {
   async stats() {
     if (!this.pc) return null;
     const r = await this.pc.getStats();
-    const out = { rtt: null, route: null, out: {}, in: {}, codecs: {} };
+    const out = { rtt: null, route: null, out: {}, in: {}, src: {}, codecs: {} };
     let pair = null;
     r.forEach((s) => {
       if (s.type === "transport" && s.selectedCandidatePairId) pair = r.get(s.selectedCandidatePairId);
@@ -296,7 +317,10 @@ export class Peer extends EventTarget {
     const midSlot = {};
     for (const [k, t] of Object.entries(this.tx)) if (t.mid !== null) midSlot[t.mid] = k;
     r.forEach((s) => {
-      if (s.type === "outbound-rtp" && midSlot[s.mid]) out.out[midSlot[s.mid]] = s;
+      if (s.type === "outbound-rtp" && midSlot[s.mid]) {
+        out.out[midSlot[s.mid]] = s;
+        if (s.mediaSourceId) out.src[midSlot[s.mid]] = r.get(s.mediaSourceId); // кадры с захвата экрана
+      }
       if (s.type === "inbound-rtp" && midSlot[s.mid]) out.in[midSlot[s.mid]] = s;
       if (s.type === "codec") out.codecs[s.id] = s.mimeType;
     });

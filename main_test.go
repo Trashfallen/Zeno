@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,4 +158,85 @@ func TestEmbeddedBetaUsers(t *testing.T) {
 	if strings.Contains(string(betaUsersJSON), "password") {
 		t.Fatal("в beta_users.json что-то похожее на пароль")
 	}
+}
+
+func TestShortCodes(t *testing.T) {
+	cases := map[string]string{"k7q-2m9": "K7Q2M9", " K7Q2M9 ": "K7Q2M9", "K7Q2M": "", "K7Q2M9X": "", "K7Q*M9": "", "AB0CD1": ""}
+	for in, want := range cases {
+		if got := normShort(in); got != want {
+			t.Errorf("normShort(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for range 100 {
+		if s := newShort(); normShort(s) != s {
+			t.Fatalf("новый код %q не проходит проверку", s)
+		}
+	}
+}
+
+func TestRendezvousCrypto(t *testing.T) {
+	testBeta(t)
+	ann, bob := testAccount(t, "ann"), testAccount(t, "bob")
+	if _, err := ann.AddFriend(bob.FriendCode()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bob.AddFriend(ann.FriendCode()); err != nil {
+		t.Fatal(err)
+	}
+	s1, _ := ann.sharedSecret(bob.ID())
+	s2, _ := bob.sharedSecret(ann.ID())
+	if len(s1) != 32 || string(s1) != string(s2) {
+		t.Fatal("общий секрет у друзей разный")
+	}
+	short := newShort()
+	topic := rdvTopic(short)
+	box, err := ann.rdvSeal(bob.ID(), short, topic, "ZENO:длинный-код")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, from, ok := bob.rdvOpen(short, topic, box)
+	if !ok || text != "ZENO:длинный-код" || from != ann.ID() {
+		t.Fatalf("ящик не открылся: %q %v", text, ok)
+	}
+	if _, _, ok := bob.rdvOpen(newShort(), topic, box); ok {
+		t.Fatal("ящик открылся чужим кодом")
+	}
+	carl := testAccount(t, "ann") // другой ключ, тот же логин
+	_, _ = carl.AddFriend(ann.FriendCode())
+	if _, _, ok := carl.rdvOpen(short, topic, box); ok {
+		t.Fatal("ящик открылся не тому, кому адресован")
+	}
+}
+
+// ZENO_NET_TEST=1 go test -run RendezvousLive - настоящие публичные брокеры.
+func TestRendezvousLive(t *testing.T) {
+	if os.Getenv("ZENO_NET_TEST") == "" {
+		t.Skip("нужна сеть: ZENO_NET_TEST=1")
+	}
+	testBeta(t)
+	ann, bob := testAccount(t, "ann"), testAccount(t, "bob")
+	_, _ = ann.AddFriend(bob.FriendCode())
+	_, _ = bob.AddFriend(ann.FriendCode())
+	app := &App{cfg: loadConfig(filepath.Join(t.TempDir(), "s.json")), quitCh: make(chan struct{})}
+	r, r2 := newRendezvous(app), newRendezvous(app) // у каждого друга своя программа
+	start := time.Now()
+	short, n, err := r.Offer(ann, bob.ID(), "ZENO:offer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("код %s, брокеров %d, %v", short, n, time.Since(start))
+	start = time.Now()
+	code, from, err := r2.Fetch(bob, strings.ToLower(short[:3]+"-"+short[3:]))
+	if err != nil || code != "ZENO:offer" || from != ann.ID() {
+		t.Fatalf("fetch: %q %v", code, err)
+	}
+	t.Logf("получен за %v", time.Since(start))
+	if err := r2.Answer(bob, short, "ZENO:answer"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := r.Wait(short, 10*time.Second); !ok || got != "ZENO:answer" {
+		t.Fatalf("ответ не дошел: %q", got)
+	}
+	r.Close(short)
+	r2.Close(short)
 }

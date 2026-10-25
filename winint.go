@@ -4,6 +4,7 @@ package main
 // Все пишется в профиль пользователя, права администратора не нужны.
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -278,4 +280,36 @@ func findOwnWindow(class string) uintptr {
 
 func allowForeground(pid int) {
 	procAllowSetForeground.Call(uintptr(pid))
+}
+
+// ---------- кадр трансляции ----------
+
+// saveSnapshot сохраняет PNG (data:image/png;base64,...) в «Изображения\Zeno»
+// и показывает файл в проводнике.
+func saveSnapshot(dataURL string) (string, error) {
+	raw, ok := strings.CutPrefix(dataURL, "data:image/png;base64,")
+	if !ok {
+		return "", errors.New("кадр не в формате PNG")
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return "", err
+	}
+	dir := knownFolder(windows.FOLDERID_Pictures)
+	if dir == "" {
+		dir, _ = os.UserHomeDir()
+	}
+	dir = filepath.Join(dir, appName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "Zeno-"+time.Now().Format("2006-01-02_15-04-05")+".png")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("explorer.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `explorer.exe /select,"` + path + `"`}
+	_ = cmd.Start()
+	go cmd.Wait()
+	return path, nil
 }

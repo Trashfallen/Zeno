@@ -1,14 +1,16 @@
 // Микрофон и звуки.
 //
-// Цепочка микрофона: захват с обработкой Chromium (шумоподавление,
-// эхоподавление, автоусиление, изоляция голоса - что включено в настройках)
-// -> громкость ввода -> шумовой гейт (gate-worklet.js) -> выключатель
-// (микрофон выкл / push-to-talk) -> дорожка, которая уходит другу.
+// Цепочка микрофона: захват с обработкой Chromium (эхоподавление,
+// автоусиление, стандартный шумодав и изоляция голоса - что включено)
+// -> громкость ввода -> RNNoise и отсечка «не голоса» (voice-worklet.js)
+// -> выключатель (микрофон выкл / push-to-talk) -> дорожка, которая уходит другу.
 
 export const VOICE_DEFAULTS = {
   input: "default", output: "default", camera: "default",
-  inputVolume: 100, outputVolume: 100, voiceVolume: 100, streamVolume: 100,
-  ns: true, isolation: true, ec: true, agc: true,
+  inputVolume: 100, outputVolume: 100,
+  nsMode: "rnnoise", // rnnoise (нейросеть, как Krisp) | standard (Chromium) | off
+  vad: true, // передавать только голос
+  isolation: true, ec: true, agc: true,
   gate: true, gateAuto: true, threshold: -50,
   mode: "vad", pttKey: 0, pttLabel: "",
   voiceKbps: 64,
@@ -40,13 +42,15 @@ export class Mic extends EventTarget {
   get speaking() { return this.transmitting && this.gateOpen; }
 
   static captureKey(cfg) {
-    return [cfg.input, cfg.ns, cfg.isolation, cfg.ec, cfg.agc].join("|");
+    return [cfg.input, cfg.nsMode, cfg.isolation, cfg.ec, cfg.agc].join("|");
   }
 
   async start(cfg) {
     this.stop();
-    const audio = { echoCancellation: cfg.ec, noiseSuppression: cfg.ns, autoGainControl: cfg.agc, channelCount: 1, sampleRate: 48000 };
-    if (supportsVoiceIsolation()) audio.voiceIsolation = cfg.ns && cfg.isolation;
+    // при RNNoise стандартный шумодав выключен: два шумодава подряд портят голос
+    const standard = cfg.nsMode === "standard";
+    const audio = { echoCancellation: cfg.ec, noiseSuppression: standard, autoGainControl: cfg.agc, channelCount: 1, sampleRate: 48000 };
+    if (supportsVoiceIsolation()) audio.voiceIsolation = standard && cfg.isolation;
     if (cfg.input && cfg.input !== "default") audio.deviceId = { exact: cfg.input };
     try {
       this.raw = await navigator.mediaDevices.getUserMedia({ audio });
@@ -56,15 +60,21 @@ export class Mic extends EventTarget {
       this.raw = await navigator.mediaDevices.getUserMedia({ audio });
     }
     this.ctx = new AudioContext({ latencyHint: "interactive", sampleRate: 48000 });
-    await this.ctx.audioWorklet.addModule("gate-worklet.js");
+    await this.ctx.audioWorklet.addModule("voice-worklet.js");
     const src = this.ctx.createMediaStreamSource(this.raw);
     this.gain = this.ctx.createGain();
-    this.gate = new AudioWorkletNode(this.ctx, "zeno-gate", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+    this.gate = new AudioWorkletNode(this.ctx, "zeno-voice", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
     this.out = this.ctx.createGain();
     this.dest = this.ctx.createMediaStreamDestination();
     this.dest.channelCount = 1;
     src.connect(this.gain).connect(this.gate).connect(this.out).connect(this.dest);
     this.gate.port.onmessage = (e) => {
+      if (e.data.error) {
+        console.warn("RNNoise не загрузился:", e.data.error);
+        this.rnnoiseError = e.data.error;
+        return;
+      }
+      this.voiceProb = e.data.prob;
       this.level = e.data.level;
       this.gateOpen = e.data.open;
       this.threshold = e.data.threshold;
@@ -86,6 +96,8 @@ export class Mic extends EventTarget {
       enabled: cfg.gate && !this.ptt,
       mode: this.ptt ? "open" : (cfg.gateAuto ? "auto" : "manual"),
       threshold: cfg.threshold,
+      denoise: cfg.nsMode === "rnnoise",
+      vad: cfg.vad && !this.ptt,
     });
     this._updateOut();
   }
@@ -105,6 +117,61 @@ export class Mic extends EventTarget {
     this.raw = this.track = this.ctx = null;
     this.gateOpen = false;
     this.level = -120;
+  }
+}
+
+// Воспроизведение звука друга с громкостью 0-300%, как в Discord.
+//
+// До 100% играет обычный <audio> (громкость элемента): так работает
+// эхоподавление. Выше 100% элемент глушится, а звук идет через усилитель
+// Web Audio. Элемент со srcObject при этом нужен все равно: без него Chromium
+// не отдает чужую WebRTC-дорожку в Web Audio.
+export class Playback {
+  constructor(el) {
+    this.el = el;
+    this.ctx = null;
+    this.src = null;
+    this.gain = null;
+    this.track = null;
+  }
+
+  setTrack(track) {
+    if (track === this.track) return;
+    this.track = track;
+    this.el.srcObject = track ? new MediaStream([track]) : null;
+    if (this.src) { this.src.disconnect(); this.src = null; }
+  }
+
+  // level - 0..3 (1 = 100%)
+  apply(level, muted, sink) {
+    const sinkId = !sink || sink === "default" ? "" : sink;
+    if (this.el.setSinkId && this.el.sinkId !== sinkId) this.el.setSinkId(sinkId).catch(() => {});
+    const boost = !muted && level > 1 && this.track;
+    if (!boost) {
+      this.el.muted = muted;
+      this.el.volume = Math.max(0, Math.min(1, level));
+      if (this.gain) this.gain.gain.value = 0;
+      return;
+    }
+    this.el.muted = true;
+    if (!this.ctx) {
+      this.ctx = new AudioContext({ latencyHint: "interactive" });
+      this.gain = this.ctx.createGain();
+      this.gain.connect(this.ctx.destination);
+    }
+    if (this.ctx.setSinkId && this.ctx.sinkId !== sinkId) this.ctx.setSinkId(sinkId).catch(() => {});
+    if (!this.src && this.el.srcObject) {
+      this.src = this.ctx.createMediaStreamSource(this.el.srcObject);
+      this.src.connect(this.gain);
+    }
+    this.gain.gain.value = level;
+    if (this.ctx.state !== "running") this.ctx.resume().catch(() => {});
+  }
+
+  stop() {
+    this.setTrack(null);
+    if (this.ctx) this.ctx.close().catch(() => {});
+    this.ctx = this.gain = this.src = null;
   }
 }
 

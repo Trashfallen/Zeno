@@ -38,6 +38,10 @@ var (
 	procMessageBoxW           = modUser32.NewProc("MessageBoxW")
 	procAllowSetForeground    = modUser32.NewProc("AllowSetForegroundWindow")
 	procFlashWindowEx         = modUser32.NewProc("FlashWindowEx")
+	procGetWindowLongPtrW     = modUser32.NewProc("GetWindowLongPtrW")
+	procSetWindowPos          = modUser32.NewProc("SetWindowPos")
+	procMonitorFromWindow     = modUser32.NewProc("MonitorFromWindow")
+	procGetMonitorInfoW       = modUser32.NewProc("GetMonitorInfoW")
 	procDwmSetWindowAttribute = modDwmapi.NewProc("DwmSetWindowAttribute")
 )
 
@@ -73,6 +77,12 @@ type Window struct {
 	quitting atomic.Bool
 	origProc uintptr
 	hinted   bool
+	full     *fullState // не nil - окно развернуто во весь экран
+}
+
+type fullState struct {
+	style uintptr
+	place windowPlacement
 }
 
 var (
@@ -203,9 +213,53 @@ func (win *Window) Attention(show bool) {
 	procFlashWindowEx.Call(uintptr(unsafe.Pointer(&fi)))
 }
 
+// SetFullscreen разворачивает окно на весь монитор без рамки (трансляция во
+// весь экран) и возвращает как было. Внутри WebView2 requestFullscreen
+// растягивает картинку только до краев окна, поэтому делаем это сами.
+func (win *Window) SetFullscreen(on bool) {
+	h := win.hwnd()
+	if h == 0 {
+		return
+	}
+	const gwlStyle = ^uintptr(15) // -16
+	const wsOverlapped = 0x00CF0000
+	const swpFrameChanged, swpNoOwnerZ, swpNoZOrder = 0x0020, 0x0200, 0x0004
+	win.mu.Lock()
+	defer win.mu.Unlock()
+	if on && win.full == nil {
+		st := &fullState{}
+		st.style, _, _ = procGetWindowLongPtrW.Call(h, gwlStyle)
+		st.place.Length = uint32(unsafe.Sizeof(st.place))
+		procGetWindowPlacement.Call(h, uintptr(unsafe.Pointer(&st.place)))
+		type monitorInfo struct {
+			Size          uint32
+			Monitor, Work rect
+			Flags         uint32
+		}
+		mi := monitorInfo{}
+		mi.Size = uint32(unsafe.Sizeof(mi))
+		mon, _, _ := procMonitorFromWindow.Call(h, 2) // MONITOR_DEFAULTTONEAREST
+		if r, _, _ := procGetMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi))); r == 0 {
+			return
+		}
+		win.full = st
+		procSetWindowLongPtrW.Call(h, gwlStyle, st.style&^wsOverlapped)
+		m := mi.Monitor
+		procSetWindowPos.Call(h, 0, uintptr(m.Left), uintptr(m.Top), uintptr(m.Right-m.Left), uintptr(m.Bottom-m.Top),
+			swpFrameChanged|swpNoOwnerZ)
+	} else if !on && win.full != nil {
+		st := win.full
+		win.full = nil
+		procSetWindowLongPtrW.Call(h, gwlStyle, st.style)
+		procSetWindowPlacement.Call(h, uintptr(unsafe.Pointer(&st.place)))
+		procSetWindowPos.Call(h, 0, 0, 0, 0, 0, swpFrameChanged|swpNoOwnerZ|swpNoZOrder|0x0001|0x0002) // NOSIZE|NOMOVE
+	}
+}
+
 func subclassProc(hwnd, msg, wp, lp uintptr) uintptr {
 	win := theWindow
 	if msg == wmClose && win != nil && !win.quitting.Load() {
+		win.SetFullscreen(false)
 		win.savePlacement(hwnd)
 		if win.app.cfg.Bool("close_to_tray") {
 			procShowWindow.Call(hwnd, swHide)

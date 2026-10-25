@@ -29,7 +29,7 @@ import (
 //go:embed ui
 var uiFiles embed.FS
 
-const maxBody = 1 << 20
+const maxBody = 32 << 20 // кадр трансляции в PNG бывает несколько МБ
 
 var errNotFound = errors.New("не найдено")
 
@@ -104,7 +104,7 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "+
-		"style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'")
+		"style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'")
 	_, _ = w.Write(b)
 }
 
@@ -194,6 +194,20 @@ func (s *Server) route(path string, body M) (any, error) {
 	case "notify":
 		app.notify(str(body, "title"), str(body, "text"))
 		return nil, nil
+	case "capturebar":
+		on, _ := body["active"].(bool)
+		app.SetCaptureActive(on)
+		return nil, nil
+	case "fullscreen":
+		on, _ := body["on"].(bool)
+		app.window.SetFullscreen(on)
+		return nil, nil
+	case "snapshot":
+		path, err := saveSnapshot(str(body, "png"))
+		if err != nil {
+			return nil, err
+		}
+		return M{"path": path}, nil
 	case "ptt":
 		vk, _ := body["vk"].(float64)
 		app.ptt.Set(int(vk))
@@ -245,6 +259,30 @@ func (s *Server) route(path string, body M) (any, error) {
 			return nil, err
 		}
 		return M{"code": code, "nonce": nonce}, nil
+	case "rdv/offer":
+		short, n, err := app.rdv.Offer(acc, str(body, "to"), str(body, "code"))
+		if err != nil {
+			return nil, err
+		}
+		return M{"short": short, "brokers": n}, nil
+	case "rdv/wait":
+		ms, _ := body["timeout"].(float64)
+		if ms <= 0 || ms > 30000 {
+			ms = 25000
+		}
+		code, ok := app.rdv.Wait(str(body, "short"), time.Duration(ms)*time.Millisecond)
+		return M{"code": code, "ok": ok}, nil
+	case "rdv/fetch":
+		code, from, err := app.rdv.Fetch(acc, str(body, "short"))
+		if err != nil {
+			return nil, err
+		}
+		return M{"code": code, "friend": from}, nil
+	case "rdv/answer":
+		return nil, app.rdv.Answer(acc, str(body, "short"), str(body, "code"))
+	case "rdv/cancel":
+		app.rdv.Close(str(body, "short"))
+		return nil, nil
 	case "invite/open":
 		in, fr, err := acc.OpenInvite(str(body, "code"))
 		if err != nil {

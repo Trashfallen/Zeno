@@ -60,6 +60,7 @@ type App struct {
 	window    *Window
 	updater   *Updater
 	ptt       *PTT
+	rdv       *Rendezvous
 	quitCh    chan struct{}
 	quitOnce  sync.Once
 	trayReady atomic.Bool
@@ -99,6 +100,7 @@ func main() {
 	app.updater = newUpdater()
 	app.window = newWindow(app)
 	app.ptt = newPTT(app)
+	app.rdv = newRendezvous(app)
 	app.server, err = newServer(app)
 	if err != nil {
 		messageBox(appName, "Не удалось открыть локальный порт для окна: "+err.Error())

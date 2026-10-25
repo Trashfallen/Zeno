@@ -1,7 +1,7 @@
 // Zeno: интерфейс. Вход, друзья, чат, звонок, трансляция экрана, настройки.
 
 import { api, $, $$, h, esc, copyText, readClipboard, icon, avatar, hhmm, dayLabel, duration } from "./api.js";
-import { Mic, LevelWatcher, Sfx, VOICE_DEFAULTS, supportsVoiceIsolation } from "./voice.js";
+import { Mic, LevelWatcher, Playback, Sfx, VOICE_DEFAULTS, supportsVoiceIsolation } from "./voice.js";
 import { Peer, SLOTS, DEFAULT_STUN, SCREEN_PRESETS } from "./peer.js";
 
 const MEDIA_DEFAULTS = {
@@ -9,6 +9,8 @@ const MEDIA_DEFAULTS = {
   screenPreset: "1080p60", screenMode: "motion", screenAudio: true, codec: "h264", camRes: "720p",
   stun: DEFAULT_STUN.join("\n"), turnUrl: "", turnUser: "", turnPass: "",
   sounds: true, notifyMessages: true,
+  stageHeight: 0, // высота окна звонка, 0 - по умолчанию
+  vol: {}, // громкость друзей: { id: { voice, stream, voiceMuted, streamMuted } }, 0-300%
 };
 const COLORS = ["#5865f2", "#3ba55c", "#faa61a", "#ed4245", "#eb459e", "#9b59b6", "#1abc9c", "#e67e22"];
 const SPEAK_DB = -50;
@@ -18,12 +20,14 @@ const S = {
   view: "home", homeTab: "all", sel: null,
   peers: new Map(), msgs: new Map(), loaded: new Set(), unread: new Map(), typing: new Map(), remote: new Map(),
   call: null, cam: null, screen: null, focus: null, showStats: false, muted: false, deaf: false,
-  rtt: null, route: null, connectFor: null,
+  rtt: null, route: null, connectFor: null, full: false, showStrip: false,
 };
 
 const mic = new Mic();
 const sfx = new Sfx();
 const remoteLevel = new LevelWatcher();
+const pbVoice = new Playback($("#aVoice"));
+const pbSys = new Playback($("#aSys"));
 const videos = new Map(); // ключ плитки -> <video>, чтобы перерисовка не сбрасывала картинку
 
 const fr = (id) => S.friends.find((f) => f.id === id);
@@ -50,6 +54,8 @@ function applyState(st) {
   S.version = st.version;
   S.settings = st.settings || {};
   S.media = { ...MEDIA_DEFAULTS, ...(S.settings.media || {}) };
+  if (S.settings.media && S.settings.media.ns === false && !S.settings.media.nsMode) S.media.nsMode = "off"; // старая настройка
+  delete S.media.ns;
   S.me = st.account;
   S.friends = st.friends || [];
   S.autostart = st.autostart;
@@ -153,7 +159,7 @@ function staticIcons() {
   $("#sideAdd").innerHTML = icon("plus", 16);
   $("#navFriendsIco").innerHTML = icon("users", 22);
   $("#homeIco").innerHTML = icon("users", 22);
-  $("#homePaste").innerHTML = icon("paste", 18) + "Вставить код";
+  $("#homePaste").innerHTML = icon("paste", 18) + "Ввести код";
   $("#ubSettings").innerHTML = icon("gear", 20);
   $("#dmCall").innerHTML = icon("phone", 20);
   $("#dmVideo").innerHTML = icon("video", 22);
@@ -163,6 +169,7 @@ function staticIcons() {
   $("#sbHang").innerHTML = icon("hang", 26);
   $("#sbScreenOpts").innerHTML = icon("down", 16);
   $("#sbStats").innerHTML = icon("info", 20);
+  $("#sbStrip").innerHTML = icon("users", 20);
 }
 
 function renderAll() {
@@ -220,6 +227,7 @@ function renderSide() {
     return h("button", {
       class: "dm" + (S.view === "dm" && S.sel === f.id ? " active" : "") + (n ? " unread" : ""),
       onclick: () => openDM(f.id),
+      oncontextmenu: (e) => userMenu(e, f.id),
     }, avatarWithDot(f, 32, st), h("div", { class: "dm-text" }, h("div", { class: "dm-name" }, f.nick), sub), n ? h("span", { class: "badge" }, n) : null);
   }));
 }
@@ -682,7 +690,7 @@ async function onPeerMessage(id, m) {
 
 // ---------- коды ----------
 
-async function handleCode(raw) {
+async function handleCode(raw, opts) {
   const text = (raw || "").trim();
   if (text.startsWith("ZENO-FRIEND:")) {
     const r = await api("friends/add", { code: text });
@@ -700,6 +708,11 @@ async function handleCode(raw) {
       if (S.call && S.call.id === id) endCall();
       closeConnectModal(id);
       openDM(id);
+      if (opts && opts.short) { // ответ уйдет через тот же ящик на публичных серверах
+        const code = await p.acceptOffer(inv);
+        await api("rdv/answer", { short: opts.short, code });
+        return true;
+      }
       const m = answerModal(fr(id));
       try {
         const code = await p.acceptOffer(inv);
@@ -718,14 +731,17 @@ async function handleCode(raw) {
   return false;
 }
 
+const SHORT_RE = /^\s*[A-Za-z0-9]{3}-?[A-Za-z0-9]{3}\s*$/;
+
 async function pasteFromClipboard() {
-  const text = await readClipboard();
+  const text = (await readClipboard()).trim();
+  if (SHORT_RE.test(text)) return enterCodeModal(text);
   try {
     if (text && (await handleCode(text))) return;
   } catch (e) {
     return fail(e);
   }
-  pasteModal();
+  enterCodeModal();
 }
 
 document.addEventListener("paste", (e) => {
@@ -735,12 +751,15 @@ document.addEventListener("paste", (e) => {
   if (/^\s*ZENO/.test(text)) {
     e.preventDefault();
     handleCode(text).catch(fail);
+  } else if (SHORT_RE.test(text)) {
+    e.preventDefault();
+    enterCodeModal(text);
   }
 });
 
 $("#dmLink").onclick = () => openConnect(S.sel);
 $("#lbOffer").onclick = () => openConnect(S.sel);
-$("#lbPaste").onclick = () => pasteFromClipboard();
+$("#lbPaste").onclick = () => enterCodeModal();
 
 // ---------- окна ----------
 
@@ -768,6 +787,12 @@ function codeBox(label) {
   return { el: h("div", { class: "code-box" }, code, btn), code, btn };
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function codeCells() {
+  return h("div", { class: "short-code" }, [0, 1, 2, 3, 4, 5].map((i) => h("span", { class: i === 3 ? "gap" : "" }, "")));
+}
+
 function openConnect(id) {
   const f = fr(id);
   if (!f) return;
@@ -776,23 +801,29 @@ function openConnect(id) {
     if (S.call && S.call.id === id) hangup();
   }
   const p = getPeer(id);
-  const cb = codeBox("Готовлю код… (несколько секунд)");
-  const answer = h("textarea", { class: "input", rows: "3", placeholder: "Вставьте сюда код-ответ (начинается с ZENO:)", spellcheck: "false" });
-  const status = h("div", { class: "status-line" });
-  const go = h("button", { class: "btn primary" }, "Подключиться");
-  const n1 = h("div", { class: "step-n" }, "1");
+  let short = "";
+  let closed = false;
+  const cells = codeCells();
+  const copyBtn = h("button", { class: "btn primary", disabled: true, html: icon("copy", 18) + "Скопировать код" });
+  const status = h("div", { class: "status-line center" }, h("i", { class: "spinner" }), "Готовлю код…");
+  const longBox = codeBox("Готовлю…");
+  const answer = h("textarea", { class: "input", rows: "3", placeholder: "Код-ответ друга (начинается с ZENO:)", spellcheck: "false" });
+  const go = h("button", { class: "btn small primary" }, "Подключиться");
+  const details = h("details", { class: "long-code" },
+    h("summary", {}, "Не соединяется? Обменяйтесь длинными кодами"),
+    h("p", { class: "hint" }, "Если публичные серверы для коротких кодов недоступны: отправьте другу этот длинный код, он вставит его в Zeno (Ctrl+V) и пришлет код-ответ."),
+    longBox.el, answer, h("div", { class: "row-end" }, go));
   const m = modal({
     title: `Соединение с ${f.nick}`,
-    sub: "Сервера нет: вы обмениваетесь двумя кодами через любой мессенджер. Коды подписаны вашими ключами и действуют час.",
+    sub: `Отправьте ${f.nick} этот код любым способом. Он вводит его у себя в Zeno - и вы на связи.`,
     wide: true,
-    body: [
-      h("div", { class: "step" }, n1, h("div", { class: "step-body" }, h("b", {}, "Отправьте этот код другу"), cb.el)),
-      h("div", { class: "step" }, h("div", { class: "step-n" }, "2"), h("div", { class: "step-body" },
-        h("b", {}, "Друг вставит его у себя (Ctrl+V в окне Zeno) и пришлет код-ответ - вставьте его сюда"), answer)),
-      status,
-    ],
-    foot: [h("button", { class: "btn ghost", onclick: () => m.close() }, "Закрыть"), go],
-    onClose: () => { if (S.connectFor && S.connectFor.id === id) S.connectFor = null; },
+    body: [cells, h("div", { class: "code-actions" }, copyBtn), status, details],
+    foot: [h("button", { class: "btn ghost", onclick: () => m.close() }, "Закрыть")],
+    onClose: () => {
+      closed = true;
+      if (short) api("rdv/cancel", { short }).catch(() => {});
+      if (S.connectFor && S.connectFor.id === id) S.connectFor = null;
+    },
   });
   const setStatus = (text, spin) => status.replaceChildren(spin ? h("i", { class: "spinner" }) : "", text);
   S.connectFor = { id, close: m.close, setStatus };
@@ -801,14 +832,100 @@ function openConnect(id) {
       if (!(await handleCode(answer.value))) toast("Это не код Zeno", "err");
     } catch (e) { fail(e); }
   };
-  p.makeOffer().then(async (code) => {
-    cb.code.textContent = code;
-    cb.btn.disabled = false;
-    cb.btn.onclick = async () => { if (await copyText(code)) toast("Код скопирован", "ok"); };
-    n1.classList.add("done");
-    if (await copyText(code)) toast("Код скопирован - отправьте его другу", "ok");
-    answer.focus();
+  p.makeOffer().then(async (long) => {
+    longBox.code.textContent = long;
+    longBox.btn.disabled = false;
+    longBox.btn.onclick = async () => { if (await copyText(long)) toast("Длинный код скопирован", "ok"); };
+    try {
+      const r = await api("rdv/offer", { to: id, code: long });
+      if (closed) return api("rdv/cancel", { short: r.short }).catch(() => {});
+      short = r.short;
+      [...cells.children].forEach((c, i) => { c.textContent = short[i]; });
+      cells.classList.add("ready");
+      copyBtn.disabled = false;
+      copyBtn.onclick = async () => { if (await copyText(short)) toast("Код скопирован", "ok"); };
+      if (await copyText(short)) toast("Код скопирован - отправьте его другу", "ok");
+      setStatus(`Ждем, пока ${f.nick} введет код. Код действует час.`, true);
+      while (!closed) {
+        const w = await api("rdv/wait", { short, timeout: 25000 }).catch(() => null);
+        if (closed) break;
+        if (!w) { await sleep(2000); continue; }
+        if (w.ok) {
+          setStatus("Соединяюсь…", true);
+          await handleCode(w.code).catch(fail);
+          break;
+        }
+      }
+    } catch (e) {
+      cells.hidden = true;
+      copyBtn.hidden = true;
+      setStatus(e.message, false);
+      details.open = true;
+    }
   }).catch((e) => { m.close(); fail(e); });
+}
+
+function enterCodeModal(prefill) {
+  const inp = h("input", { class: "code-input", maxlength: "7", placeholder: "•••-•••", spellcheck: "false", autocomplete: "off" });
+  const longTa = h("textarea", { class: "input", rows: "3", placeholder: "ZENO:… или ZENO-FRIEND:…", spellcheck: "false" });
+  const status = h("div", { class: "status-line center" });
+  const goBtn = h("button", { class: "btn primary" }, "Соединиться");
+  const m = modal({
+    title: "Ввести код",
+    sub: "6 букв и цифр, которые прислал друг.",
+    body: [inp, status, h("details", { class: "long-code" }, h("summary", {}, "У меня длинный код или код дружбы"), longTa)],
+    foot: [h("button", { class: "btn ghost", onclick: () => m.close() }, "Отмена"), goBtn],
+  });
+  const setStatus = (text, spin, err) => {
+    status.classList.toggle("err", !!err);
+    status.replaceChildren(spin ? h("i", { class: "spinner" }) : "", text || "");
+  };
+  let busy = false;
+  const go = async () => {
+    if (busy) return;
+    const long = longTa.value.trim();
+    busy = true;
+    goBtn.disabled = true;
+    try {
+      if (long) {
+        if (await handleCode(long)) m.close();
+        else setStatus("Это не код Zeno", false, true);
+        return;
+      }
+      const short = inp.value.replace(/-/g, "");
+      if (short.length !== 6) return setStatus("Нужно 6 знаков", false, true);
+      setStatus("Ищу код…", true);
+      const r = await api("rdv/fetch", { short });
+      setStatus("Соединяюсь…", true);
+      await handleCode(r.code, { short });
+      const t0 = Date.now();
+      while (!isConnected(r.friend) && Date.now() - t0 < 30000 && document.body.contains(m.box)) await sleep(300);
+      if (isConnected(r.friend)) {
+        m.close();
+        api("rdv/cancel", { short }).catch(() => {});
+      } else if (document.body.contains(m.box)) {
+        setStatus("Напрямую не соединилось. Попробуйте длинные коды или TURN в настройках.", false, true);
+      }
+    } catch (e) {
+      setStatus(e.message, false, true);
+    } finally {
+      busy = false;
+      goBtn.disabled = false;
+    }
+  };
+  inp.oninput = () => {
+    const v = inp.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    inp.value = v.length > 3 ? v.slice(0, 3) + "-" + v.slice(3) : v;
+    setStatus("");
+    if (v.length === 6) go();
+  };
+  inp.onkeydown = (e) => { if (e.key === "Enter") go(); };
+  goBtn.onclick = go;
+  inp.focus();
+  if (prefill) {
+    inp.value = prefill.trim();
+    inp.oninput();
+  }
 }
 
 function closeConnectModal(id) {
@@ -993,6 +1110,7 @@ function endCall(reason) {
   S.call = null;
   S.focus = null;
   S.rtt = S.route = null;
+  if (S.full) setFull(false);
   document.body.classList.remove("theater");
   syncPTT();
   renderAll();
@@ -1013,33 +1131,41 @@ async function tuneSenders() {
   if (S.screen) await tuneScreen();
 }
 
+const VOL_DEFAULT = { voice: 100, stream: 100, voiceMuted: false, streamMuted: false };
+
+function vol(id) {
+  return { ...VOL_DEFAULT, ...((S.media.vol || {})[id] || {}) };
+}
+
+function setVol(id, patch) {
+  S.media.vol = { ...(S.media.vol || {}), [id]: { ...vol(id), ...patch } };
+  applyOutput();
+  saveMedia();
+  renderStage();
+}
+
 function attachRemote(id) {
   const p = peerOf(id);
   if (!p || !p.mediaReady) return;
   const voice = p.remoteTrack("mic");
   const sys = p.remoteTrack("sys");
-  $("#aVoice").srcObject = voice ? new MediaStream([voice]) : null;
-  $("#aSys").srcObject = sys ? new MediaStream([sys]) : null;
+  pbVoice.setTrack(voice);
+  pbSys.setTrack(sys);
   remoteLevel.attach(voice);
   applyOutput();
 }
 
 function detachRemote() {
-  $("#aVoice").srcObject = null;
-  $("#aSys").srcObject = null;
+  pbVoice.stop();
+  pbSys.stop();
   remoteLevel.detach();
 }
 
 function applyOutput() {
   const out = S.media.outputVolume / 100;
-  const clamp = (v) => Math.max(0, Math.min(1, v));
-  const av = $("#aVoice");
-  const as = $("#aSys");
-  av.volume = clamp(out * S.media.voiceVolume / 100);
-  as.volume = clamp(out * S.media.streamVolume / 100);
-  av.muted = as.muted = S.deaf;
-  const sink = S.media.output === "default" ? "" : S.media.output;
-  for (const a of [av, as]) if (a.setSinkId && a.sinkId !== sink) a.setSinkId(sink).catch(() => {});
+  const v = vol(S.call ? S.call.id : "");
+  pbVoice.apply((out * v.voice) / 100, S.deaf || v.voiceMuted, S.media.output);
+  pbSys.apply((out * v.stream) / 100, S.deaf || v.streamMuted, S.media.output);
 }
 
 function setMuted(v) {
@@ -1142,6 +1268,7 @@ async function startScreen() {
   const a = stream.getAudioTracks()[0];
   if (a) await p.setTrack("sys", a);
   await tuneScreen();
+  api("capturebar", { active: true }).catch(() => {});
   sfx.play("stream");
   sendState();
   renderAll();
@@ -1166,6 +1293,7 @@ function stopScreen(silent) {
   if (!S.screen) return;
   S.screen.getTracks().forEach((t) => t.stop());
   S.screen = null;
+  api("capturebar", { active: false }).catch(() => {});
   if (S.focus === "myscreen") S.focus = null;
   const p = S.call && peerOf(S.call.id);
   if (p) {
@@ -1201,8 +1329,35 @@ $("#sbScreenOpts").onclick = (e) => {
   openMenu(e.currentTarget, items, "up");
 };
 
-function menuItem(label, on, fn) {
-  return h("button", { class: "menu-item" + (on ? " on" : ""), onclick: () => { closeMenu(); fn(); } }, label);
+function menuItem(label, on, fn, cls = "") {
+  return h("button", { class: "menu-item" + (on ? " on" : "") + (cls ? " " + cls : ""), onclick: () => { closeMenu(); fn(); } }, label);
+}
+
+// menuSlider - ползунок громкости 0-300% прямо в меню (как в Discord); двойной клик - 100%
+function menuSlider(label, value, onInput) {
+  const out = h("output", {}, value + "%");
+  const r = h("input", { type: "range", min: "0", max: "300", step: "1", value: String(value) });
+  const paint = () => {
+    r.style.setProperty("--p", (r.value / 3) + "%");
+    out.textContent = r.value + "%";
+    out.classList.toggle("boost", Number(r.value) > 100);
+  };
+  r.oninput = () => { paint(); onInput(Number(r.value)); };
+  r.ondblclick = () => { r.value = "100"; paint(); onInput(100); };
+  paint();
+  return h("div", { class: "menu-slider", onmousedown: (e) => e.stopPropagation(), onclick: (e) => e.stopPropagation() },
+    h("div", { class: "ms-head" }, h("span", {}, label), out), r,
+    h("div", { class: "ms-marks" }, h("span", {}, "0"), h("span", {}, "100"), h("span", {}, "200"), h("span", {}, "300")));
+}
+
+function openMenuAt(x, y, items) {
+  closeMenu();
+  menuEl = h("div", { class: "menu" }, items);
+  document.body.append(menuEl);
+  const mr = menuEl.getBoundingClientRect();
+  menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mr.width - 8, x)) + "px";
+  menuEl.style.top = Math.max(8, Math.min(window.innerHeight - mr.height - 8, y)) + "px";
+  setTimeout(() => document.addEventListener("mousedown", outside), 0);
 }
 
 let menuEl = null;
@@ -1249,6 +1404,7 @@ function renderStage() {
   const show = !!c && S.view === "dm" && S.sel === c.id;
   stage.hidden = !show;
   if (!show) {
+    if (S.full) setFull(false);
     document.body.classList.remove("theater");
     return;
   }
@@ -1267,19 +1423,34 @@ function renderStage() {
     const mutedNow = me ? (S.muted || S.deaf) : (c.state === "active" && (rs.mic === false || rs.deaf));
     tile.append(h("div", { class: "tile-label" }, mutedNow ? h("span", { html: icon(rs.deaf && !me ? "headOff" : "micOff", 14) }) : null, person.nick));
     if (!me && c.state === "outgoing") tile.append(h("div", { class: "waiting" }, "Вызов…"));
-    if (!me && active) tile.append(volSlider("voiceVolume", "Громкость голоса"));
+    if (!me) {
+      const v = vol(f.id);
+      if (active && (v.voiceMuted || v.voice !== 100)) tile.append(h("span", { class: "vol-badge" + (v.voiceMuted ? " muted" : "") }, v.voiceMuted ? "звук выкл" : v.voice + "%"));
+      tile.oncontextmenu = (e) => userMenu(e, f.id);
+    } else {
+      tile.oncontextmenu = (e) => meMenu(e);
+    }
     return tile;
   };
 
   const screenTile = (who) => {
     const me = who === "myscreen";
     const track = me ? S.screen.getVideoTracks()[0] : p.remoteTrack("screen");
-    const tile = h("div", { class: "tile", "data-who": who },
-      videoFor(who, track, { dbl: () => toggleTheater() }),
+    const tile = h("div", { class: "tile screen", "data-who": who },
+      videoFor(who, track, { dbl: () => setFull(!S.full) }),
       h("span", { class: "live" }, "В ЭФИРЕ"),
       h("div", { class: "tile-label" }, me ? "Ваша трансляция" : `${f.nick} транслирует экран`),
-      h("div", { class: "stats", hidden: !S.showStats }));
-    if (!me) tile.append(volSlider("streamVolume", "Громкость трансляции"));
+      h("div", { class: "stats", hidden: !S.showStats }),
+      h("div", { class: "tile-actions" },
+        h("button", { class: "ta-btn", title: S.full ? "Выйти из полноэкранного (Esc)" : "Во весь экран", html: icon(S.full ? "shrink" : "expand", 18),
+          onclick: (e) => { e.stopPropagation(); setFull(!S.full); } }),
+        h("button", { class: "ta-btn", title: "Еще", html: icon("dots", 18),
+          onclick: (e) => { e.stopPropagation(); screenMenu(e, who); } })));
+    if (!me) {
+      const v = vol(f.id);
+      if (v.streamMuted || v.stream !== 100) tile.append(h("span", { class: "vol-badge" + (v.streamMuted ? " muted" : "") }, v.streamMuted ? "звук выкл" : v.stream + "%"));
+    }
+    tile.oncontextmenu = (e) => screenMenu(e, who);
     return tile;
   };
 
@@ -1305,6 +1476,12 @@ function renderStage() {
     main.replaceChildren(tiles.them, tiles.me);
     strip.replaceChildren();
   }
+  // во весь экран участники скрыты - только трансляция; кнопка показывает их поверх
+  const stripBtn = $("#sbStrip");
+  stripBtn.hidden = !(isTheater() && screens.length);
+  stripBtn.classList.toggle("on", S.showStrip);
+  stripBtn.title = S.showStrip ? "Скрыть участников" : "Показать участников";
+  strip.classList.toggle("collapsed", isTheater() && !S.showStrip);
 
   const sbMic = $("#sbMic");
   sbMic.innerHTML = icon(S.muted || S.deaf ? "micOff" : "mic", 24);
@@ -1318,25 +1495,157 @@ function renderStage() {
   sbScr.title = S.screen ? "Остановить трансляцию" : "Транслировать экран";
   sbCam.disabled = sbScr.disabled = c.state !== "active";
   $("#sbStats").classList.toggle("on", S.showStats);
-  $("#sbFull").innerHTML = icon(document.body.classList.contains("theater") ? "shrink" : "expand", 20);
+  $("#sbFull").innerHTML = icon(S.full ? "shrink" : "expand", 20);
+  $("#sbFull").title = S.full ? "Выйти из полноэкранного (Esc)" : "Во весь экран";
+  applyStageHeight();
 }
 
-function volSlider(key, title) {
-  const r = h("input", { type: "range", min: "0", max: "100", value: String(S.media[key]), title });
-  r.oninput = () => {
-    S.media[key] = Number(r.value);
-    applyOutput();
-    saveMedia();
-  };
-  return h("div", { class: "tile-vol", onclick: (e) => e.stopPropagation() }, h("span", { html: icon("volume", 16) }), r);
-}
+const isTheater = () => document.body.classList.contains("theater");
 
-function toggleTheater() {
-  document.body.classList.toggle("theater");
+function setTheater(on) {
+  if (!on && S.full) return setFull(false);
+  document.body.classList.toggle("theater", on);
   renderStage();
 }
 
-$("#sbFull").onclick = toggleTheater;
+// setFull: трансляция на весь экран - окно без рамки на весь монитор + сцена на все окно
+function setFull(on) {
+  S.full = on;
+  document.body.classList.toggle("theater", on);
+  api("fullscreen", { on }).catch(() => {});
+  renderStage();
+}
+
+async function snapshot(who) {
+  const v = videos.get(who);
+  if (!v || !v.videoWidth) return toast("Кадр еще не пришел", "err");
+  const c = document.createElement("canvas");
+  c.width = v.videoWidth;
+  c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  const r = await api("snapshot", { png: c.toDataURL("image/png") });
+  toast("Кадр сохранен: " + r.path, "ok");
+}
+
+function screenMenu(e, who) {
+  e.preventDefault();
+  if (!S.call) return;
+  const me = who === "myscreen";
+  const id = S.call.id;
+  const v = vol(id);
+  const items = [
+    h("div", { class: "menu-title" }, me ? "Ваша трансляция" : "Трансляция " + fr(id).nick),
+    menuItem(S.full ? "Выйти из полноэкранного" : "Во весь экран", false, () => setFull(!S.full)),
+    menuItem(isTheater() && !S.full ? "Обычный вид" : "Во всё окно", false, () => setTheater(!(isTheater() && !S.full))),
+    menuItem("Статистика", S.showStats, () => { S.showStats = !S.showStats; renderStage(); }),
+    menuItem("Сохранить кадр", false, () => snapshot(who).catch(fail)),
+  ];
+  if (!me) {
+    items.push(h("div", { class: "menu-sep" }),
+      menuSlider("Громкость трансляции", v.stream, (x) => setVol(id, { stream: x, streamMuted: false })),
+      menuItem("Выключить звук трансляции", v.streamMuted, () => setVol(id, { streamMuted: !v.streamMuted })));
+  } else {
+    items.push(h("div", { class: "menu-sep" }), h("div", { class: "menu-title" }, "Качество"));
+    for (const [k, pr] of Object.entries(SCREEN_PRESETS)) {
+      items.push(menuItem(pr.label, S.media.screenPreset === k, () => setMedia({ screenPreset: k }, tuneScreen)));
+    }
+    items.push(
+      menuItem("Плавность (игры)", S.media.screenMode === "motion", () => setMedia({ screenMode: "motion" }, tuneScreen)),
+      menuItem("Четкость (текст)", S.media.screenMode === "detail", () => setMedia({ screenMode: "detail" }, tuneScreen)),
+      h("div", { class: "menu-sep" }),
+      menuItem("Остановить трансляцию", false, () => stopScreen(), "danger"));
+  }
+  openMenuAt(e.clientX, e.clientY, items);
+}
+
+function userMenu(e, id) {
+  e.preventDefault();
+  const f = fr(id);
+  if (!f) return;
+  const v = vol(id);
+  const on = isConnected(id);
+  openMenuAt(e.clientX, e.clientY, [
+    h("div", { class: "menu-title" }, f.nick),
+    menuSlider("Громкость пользователя", v.voice, (x) => setVol(id, { voice: x, voiceMuted: false })),
+    menuItem("Выключить звук", v.voiceMuted, () => setVol(id, { voiceMuted: !v.voiceMuted })),
+    h("div", { class: "menu-sep" }),
+    menuItem("Написать", false, () => openDM(id)),
+    on ? menuItem("Позвонить", false, () => startCall(id, false)) : menuItem("Соединиться", false, () => openConnect(id)),
+    h("div", { class: "menu-sep" }),
+    menuItem("Удалить из друзей", false, () => removeFriend(id), "danger"),
+  ]);
+}
+
+function meMenu(e) {
+  e.preventDefault();
+  openMenuAt(e.clientX, e.clientY, [
+    menuItem(S.muted ? "Включить микрофон" : "Выключить микрофон", S.muted, () => setMuted(!S.muted)),
+    menuItem(S.deaf ? "Включить звук" : "Выключить звук", S.deaf, () => setDeaf(!S.deaf)),
+    h("div", { class: "menu-sep" }),
+    menuItem("Настройки голоса", false, () => openSettings("voice")),
+  ]);
+}
+
+// ---------- высота окна звонка ----------
+
+function applyStageHeight() {
+  const st = $("#stage");
+  const want = S.media.stageHeight;
+  st.style.height = want ? Math.max(220, Math.min(window.innerHeight - 170, want)) + "px" : "";
+}
+
+(() => {
+  const grip = $("#stageResizer");
+  let startY = 0;
+  let startH = 0;
+  grip.addEventListener("pointerdown", (e) => {
+    startY = e.clientY;
+    startH = $("#stage").offsetHeight;
+    grip.setPointerCapture(e.pointerId);
+    document.body.classList.add("resizing");
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!grip.hasPointerCapture(e.pointerId)) return;
+    S.media.stageHeight = Math.round(startH + e.clientY - startY);
+    applyStageHeight();
+  });
+  const done = (e) => {
+    if (!grip.hasPointerCapture(e.pointerId)) return;
+    grip.releasePointerCapture(e.pointerId);
+    document.body.classList.remove("resizing");
+    saveMedia();
+  };
+  grip.addEventListener("pointerup", done);
+  grip.addEventListener("pointercancel", done);
+  grip.addEventListener("dblclick", () => {
+    S.media.stageHeight = 0;
+    applyStageHeight();
+    saveMedia();
+  });
+  window.addEventListener("resize", applyStageHeight);
+})();
+
+$("#sbFull").onclick = () => setFull(!S.full);
+$("#sbStrip").onclick = () => {
+  S.showStrip = !S.showStrip;
+  renderStage();
+};
+
+// во весь экран кнопки и подписи прячутся, пока мышь не двигается (как в Discord)
+(() => {
+  const stage = $("#stage");
+  let timer = null;
+  const wake = () => {
+    stage.classList.remove("idle");
+    clearTimeout(timer);
+    if (isTheater()) timer = setTimeout(() => { if (isTheater() && !menuEl) stage.classList.add("idle"); }, 2500);
+  };
+  stage.addEventListener("mousemove", wake);
+  stage.addEventListener("mousedown", wake);
+  stage.addEventListener("mouseleave", () => { if (isTheater()) stage.classList.add("idle"); });
+  new MutationObserver(wake).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+})();
+
 $("#sbStats").onclick = () => {
   S.showStats = !S.showStats;
   renderStage();
@@ -1389,6 +1698,8 @@ async function statsTick() {
     const res = s.frameWidth ? `${s.frameWidth}×${s.frameHeight}` : "—";
     const l = [`${res}  ${Math.round(s.framesPerSecond || 0)} к/с`, `${mbps(bits)}  ${codec}`];
     if (out) {
+      const src = st.src && st.src.screen;
+      if (src && src.framesPerSecond != null) l.push(`захват: ${Math.round(src.framesPerSecond)} к/с`);
       l.push("кодер: " + (s.encoderImplementation || "?") + (s.powerEfficientEncoder ? " (аппаратный)" : ""));
       if (s.qualityLimitationReason && s.qualityLimitationReason !== "none") {
         l.push("упор: " + ({ bandwidth: "канал", cpu: "процессор" }[s.qualityLimitationReason] || s.qualityLimitationReason));
@@ -1679,6 +1990,8 @@ function secVoice() {
     h("p", { class: "hint" }, "Полоска зеленая - звук уходит другу. Белая черта - порог: все тише нее (шорох, клавиатура) отрезается."));
 
   const iso = supportsVoiceIsolation();
+  const isoRow = switchRow("Изоляция голоса", iso ? "Для стандартного шумоподавления: сильнее отделяет голос от фона." : "Недоступно в этой версии WebView2.",
+    S.media.isolation && iso, (v) => setMedia({ isolation: v }), !iso || S.media.nsMode !== "standard");
   const camBox = h("div", { class: "cam-preview" }, "Камера выключена");
   const camBtn = h("button", { class: "btn small", onclick: async () => {
     if (camTest) {
@@ -1715,8 +2028,14 @@ function secVoice() {
     pttRow,
     sensBox,
     h("h3", {}, "Обработка голоса"),
-    switchRow("Шумоподавление", "Убирает гул, вентиляторы, шум улицы и клавиатуры.", S.media.ns, (v) => setMedia({ ns: v })),
-    switchRow("Изоляция голоса", iso ? "Сильнее отделяет голос от фона (нейросеть Windows/браузера)." : "Недоступно в этой версии WebView2.", S.media.isolation && iso, (v) => setMedia({ isolation: v }), !iso),
+    h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Шумоподавление"),
+      h("div", { class: "rs-sub" }, "Нейросеть RNNoise убирает вентиляторы, улицу, клавиатуру и чавканье - как Krisp в Discord.")),
+      selectEl([["rnnoise", "Нейросеть (рекомендуется)"], ["standard", "Стандартное"], ["off", "Выключено"]], S.media.nsMode, (v) => {
+        setMedia({ nsMode: v });
+        isoRow.querySelector("input").disabled = !iso || v !== "standard";
+      })),
+    switchRow("Передавать только голос", "Пока вы не говорите, звуки не уходят вовсе: жевание, клавиатура, щелчки мыши, дыхание.", S.media.vad, (v) => setMedia({ vad: v })),
+    isoRow,
     switchRow("Эхоподавление", "Друг не слышит себя из ваших колонок. Не выключайте без наушников.", S.media.ec, (v) => setMedia({ ec: v })),
     switchRow("Автоматическая регулировка усиления", "Выравнивает громкость: тихий голос громче, крик тише.", S.media.agc, (v) => setMedia({ agc: v })),
     switchRow("Шумовой гейт", "Полная тишина между фразами (порог выше).", S.media.gate, (v) => setMedia({ gate: v })),
@@ -1756,6 +2075,12 @@ function secNet() {
     i.onchange = () => setMedia({ [key]: i.value });
     return h("label", { class: "field" }, h("span", {}, label), i);
   };
+  const brokers = h("textarea", { class: "input", rows: "4", spellcheck: "false", placeholder: "tcp://broker.emqx.io:1883" });
+  brokers.value = S.settings.brokers || "";
+  brokers.onchange = () => {
+    S.settings.brokers = brokers.value;
+    api("settings", { brokers: brokers.value }).catch(fail);
+  };
   return [
     h("h2", {}, "Соединение"),
     h("p", { class: "hint" }, "Звук, видео и сообщения идут напрямую между ПК. STUN-серверы нужны только чтобы узнать свой внешний адрес - через них ничего не передается. Изменения действуют со следующего соединения."),
@@ -1764,6 +2089,9 @@ function secNet() {
     h("p", { class: "hint" }, "Нужен, только если у обоих провайдер с серыми IP и напрямую не соединяется. Тогда трафик пойдет через ваш сервер."),
     field("Адрес (turn:host:3478)", "turnUrl"),
     h("div", { class: "grid2" }, field("Логин", "turnUser"), field("Пароль", "turnPass", "password")),
+    h("h3", {}, "Серверы для коротких кодов"),
+    h("p", { class: "hint" }, "Публичные MQTT-брокеры - через них передаются только зашифрованные длинные коды. По одному в строке (tcp://host:1883). Пусто - встроенный список."),
+    brokers,
   ];
 }
 
@@ -1810,7 +2138,10 @@ async function logout() {
 // ---------- клавиатура ----------
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && document.body.classList.contains("theater")) toggleTheater();
+  if (e.key === "Escape" && isTheater() && !document.querySelector(".overlay, .settings, .menu")) {
+    if (S.full) setFull(false);
+    else setTheater(false);
+  }
   if (e.ctrlKey && e.shiftKey && e.code === "KeyM") {
     e.preventDefault();
     setMuted(!(S.muted || S.deaf));
@@ -1832,3 +2163,24 @@ window.addEventListener("focus", () => {
 boot().catch((e) => {
   document.body.innerHTML = `<div style="padding:40px;color:#f23f43">Не удалось запустить интерфейс: ${esc(e.message)}</div>`;
 });
+
+// ---------- окно программы, а не страница ----------
+// Без перезагрузки по F5/Ctrl+R (оборвала бы звонок), масштаба, печати, поиска
+// и перехода по перетащенным файлам и ссылкам.
+
+document.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (e.key === "F5" || e.key === "F3" || e.key === "F7" || e.key === "F12" || (e.key === "BrowserBack" || e.key === "BrowserForward") ||
+    (ctrl && ["r", "p", "f", "g", "j", "h", "u", "s", "o", "n", "t", "w", "+", "=", "-", "0"].includes(k)) ||
+    (ctrl && e.shiftKey && ["i", "j", "c", "r", "delete"].includes(k)) || (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight"))) {
+    const t = e.target;
+    const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA") && ctrl && ["f", "a", "z"].includes(k);
+    if (!typing) e.preventDefault();
+  }
+}, true);
+window.addEventListener("wheel", (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => e.preventDefault());
+document.addEventListener("auxclick", (e) => { if (e.button === 1) e.preventDefault(); });
+document.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
