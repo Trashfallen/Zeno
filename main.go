@@ -63,6 +63,7 @@ type App struct {
 	rdv       *Rendezvous
 	auto      *Auto
 	sounds    *Sounds
+	stun      *StunPicker
 	quitCh    chan struct{}
 	quitOnce  sync.Once
 	trayReady atomic.Bool
@@ -105,6 +106,7 @@ func main() {
 	app.rdv = newRendezvous(app)
 	app.auto = newAuto(app)
 	app.sounds = newSounds(paths.Data)
+	app.stun = newStunPicker(app.quitCh)
 	app.server, err = newServer(app)
 	if err != nil {
 		messageBox(appName, "Не удалось открыть локальный порт для окна: "+err.Error())

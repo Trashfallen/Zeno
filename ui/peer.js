@@ -10,12 +10,16 @@ import { api } from "./api.js";
 
 export const SLOTS = ["mic", "cam", "screen", "sys"];
 
+// запасной список, пока программа не проверила серверы сама (stun.go); российские первыми
 export const DEFAULT_STUN = [
+  "stun:stun.sipnet.net:3478",
+  "stun:stun.sipnet.ru:5060",
+  "stun:stun.zadarma.com:3478",
   "stun:stun.l.google.com:19302",
-  "stun:stun1.l.google.com:19302",
-  "stun:stun.cloudflare.com:3478",
-  "stun:stun.sipnet.ru:3478",
 ];
+const OLD_DEFAULT_STUN = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302",
+  "stun:stun.cloudflare.com:3478", "stun:stun.sipnet.ru:3478"].join("\n");
+export const isOldDefaultStun = (s) => s === OLD_DEFAULT_STUN;
 
 export const SCREEN_PRESETS = {
   "720p30": { w: 1280, h: 720, fps: 30, kbps: 3500, label: "720p, 30 к/с" },

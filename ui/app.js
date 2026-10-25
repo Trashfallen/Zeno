@@ -2,12 +2,12 @@
 
 import { api, $, $$, h, esc, copyText, readClipboard, icon, avatar, hhmm, dayLabel, duration } from "./api.js";
 import { Mic, LevelWatcher, Playback, Sfx, VOICE_DEFAULTS, supportsVoiceIsolation } from "./voice.js";
-import { Peer, SLOTS, DEFAULT_STUN, SCREEN_PRESETS } from "./peer.js";
+import { Peer, SLOTS, DEFAULT_STUN, SCREEN_PRESETS, isOldDefaultStun } from "./peer.js";
 
 const MEDIA_DEFAULTS = {
   ...VOICE_DEFAULTS,
   screenPreset: "1080p60", screenMode: "motion", screenAudio: true, codec: "h264", camRes: "720p",
-  stun: DEFAULT_STUN.join("\n"), turnUrl: "", turnUser: "", turnPass: "",
+  stun: "", turnUrl: "", turnUser: "", turnPass: "", // stun пусто - выбор программы (stun.go)
   sounds: true, notifyMessages: true,
   stageHeight: 0, // высота окна звонка, 0 - по умолчанию
   vol: {}, // громкость друзей: { id: { voice, stream, voiceMuted, streamMuted } }, 0-300%
@@ -56,6 +56,7 @@ function applyState(st) {
   S.media = { ...MEDIA_DEFAULTS, ...(S.settings.media || {}) };
   if (S.settings.media && S.settings.media.ns === false && !S.settings.media.nsMode) S.media.nsMode = "off"; // старая настройка
   delete S.media.ns;
+  if (isOldDefaultStun(S.media.stun)) S.media.stun = ""; // старый список по умолчанию - теперь автовыбор
   S.me = st.account;
   S.friends = st.friends || [];
   S.autostart = st.autostart;
@@ -149,6 +150,8 @@ function showApp() {
     setInterval(fastTick, 100);
     setInterval(statsTick, 1000);
     setInterval(refreshUpdate, 10 * 60 * 1000);
+    refreshStun();
+    setInterval(refreshStun, 2 * 60 * 1000);
     autoLoop();
     if (!S.friends.length) S.homeTab = "add";
   }
@@ -547,9 +550,17 @@ function sendMessage() {
 
 // ---------- соединение ----------
 
+// S.stunAuto - выбор программы: только серверы, видящие настоящий адрес (мимо VPN)
+S.stunAuto = null;
+
+async function refreshStun() {
+  try { S.stunAuto = await api("net/stun"); } catch (e) { /* остается прежний */ }
+}
+
 function iceServers() {
-  const stun = S.media.stun.split(/\s+/).map((s) => s.trim()).filter((s) => /^stuns?:/.test(s));
-  const list = [{ urls: stun.length ? stun : DEFAULT_STUN }];
+  const own = S.media.stun.split(/\s+/).map((s) => s.trim()).filter((s) => /^stuns?:/.test(s));
+  const auto = S.stunAuto && S.stunAuto.servers && S.stunAuto.servers.length ? S.stunAuto.servers : DEFAULT_STUN;
+  const list = [{ urls: own.length ? own : auto }];
   if (S.media.turnUrl.trim()) {
     list.push({ urls: S.media.turnUrl.trim().split(/\s+/), username: S.media.turnUser, credential: S.media.turnPass });
   }
@@ -1709,7 +1720,8 @@ function meMenu(e) {
 function applyStageHeight() {
   const st = $("#stage");
   const want = S.media.stageHeight;
-  st.style.height = want ? Math.max(220, Math.min(window.innerHeight - 170, want)) + "px" : "";
+  // во весь экран сцена на все окно - сохраненная высота не должна ее урезать
+  st.style.height = want && !isTheater() ? Math.max(220, Math.min(window.innerHeight - 170, want)) + "px" : "";
 }
 
 (() => {
@@ -2245,8 +2257,12 @@ function secScreen() {
 }
 
 function secNet() {
-  const stun = h("textarea", { class: "input", rows: "5", spellcheck: "false" });
+  const stun = h("textarea", { class: "input", rows: "4", spellcheck: "false", placeholder: "Пусто - выбирать автоматически" });
   stun.value = S.media.stun;
+  const a = S.stunAuto;
+  const autoInfo = h("p", { class: "hint" }, !a ? "Проверяю серверы…"
+    : (a.vpn ? `Обнаружен VPN: зарубежные серверы видят адрес ${a.other}, российские - ${a.direct}. Звонки идут мимо VPN, через ${a.direct}.`
+      : `Внешний адрес: ${a.direct || "не определен"}.`) + " Серверы: " + a.servers.map((x) => x.replace("stun:", "")).join(", "));
   stun.onchange = () => setMedia({ stun: stun.value });
   const field = (label, key, type = "text") => {
     const i = h("input", { class: "input", type, value: S.media[key], spellcheck: "false" });
@@ -2263,6 +2279,7 @@ function secNet() {
     h("h2", {}, "Соединение"),
     h("p", { class: "hint" }, "Звук, видео и сообщения идут напрямую между ПК. STUN-серверы нужны только чтобы узнать свой внешний адрес - через них ничего не передается. Изменения действуют со следующего соединения."),
     h("label", { class: "field" }, h("span", {}, "STUN-серверы, по одному в строке"), stun),
+    autoInfo,
     h("h3", {}, "TURN (запасной путь)"),
     h("p", { class: "hint" }, "Нужен, только если у обоих провайдер с серыми IP и напрямую не соединяется. Тогда трафик пойдет через ваш сервер."),
     field("Адрес (turn:host:3478)", "turnUrl"),

@@ -201,6 +201,8 @@ func (s *Server) route(path string, body M) (any, error) {
 		on, _ := body["active"].(bool)
 		app.SetCaptureActive(on)
 		return nil, nil
+	case "net/stun":
+		return app.stun.Info(), nil
 	case "ring":
 		on, _ := body["on"].(bool)
 		app.sounds.Ring(on)

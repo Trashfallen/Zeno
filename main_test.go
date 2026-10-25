@@ -253,3 +253,16 @@ func TestUpdateRedirectLive(t *testing.T) {
 	}
 	t.Logf("последняя %s, файл %s", st.Version, u.asset)
 }
+
+func TestStunLive(t *testing.T) {
+	if os.Getenv("ZENO_NET_TEST") == "" {
+		t.Skip("нужна сеть: ZENO_NET_TEST=1")
+	}
+	p := &StunPicker{}
+	p.refresh()
+	info := p.Info()
+	t.Logf("%+v", info)
+	if len(info.Servers) == 0 || info.Direct == "" {
+		t.Fatal("ни один STUN не ответил")
+	}
+}
