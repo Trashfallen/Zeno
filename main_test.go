@@ -240,3 +240,16 @@ func TestRendezvousLive(t *testing.T) {
 	r.Close(short)
 	r2.Close(short)
 }
+
+func TestUpdateRedirectLive(t *testing.T) {
+	if os.Getenv("ZENO_NET_TEST") == "" {
+		t.Skip("нужна сеть: ZENO_NET_TEST=1")
+	}
+	u := newUpdater()
+	u.checkByRedirect("403")
+	st := u.State()
+	if st.Error != "" || !strings.HasPrefix(st.Version, "v") || !strings.Contains(u.asset, "/releases/download/") {
+		t.Fatalf("проверка без API: %+v %s", st, u.asset)
+	}
+	t.Logf("последняя %s, файл %s", st.Version, u.asset)
+}

@@ -141,6 +141,11 @@ func (u *Updater) Check() {
 		})
 		return
 	}
+	if resp.StatusCode == 403 || resp.StatusCode == 429 {
+		// лимит API GitHub (60 запросов в час на адрес) - смотрим обычную страницу релизов
+		u.checkByRedirect(resp.Status)
+		return
+	}
 	if resp.StatusCode != 200 {
 		u.set(func(s *UpdateState) { s.Checked, s.Error = true, "GitHub ответил "+resp.Status })
 		return
@@ -322,4 +327,39 @@ func cleanupOldExe() {
 		time.Sleep(250 * time.Millisecond)
 	}
 	_ = os.Remove(exe + ".new")
+}
+
+// checkByRedirect узнает последнюю версию без API: github.com/.../releases/latest
+// перенаправляет на страницу тега, файл релиза лежит по известному адресу.
+// У этого пути нет лимита запросов, но и описания изменений нет.
+func (u *Updater) checkByRedirect(apiStatus string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://github.com/"+updateRepo+"/releases/latest", nil)
+	req.Header.Set("User-Agent", appName+"/"+appVersion)
+	resp, err := client.Do(req)
+	if err != nil {
+		u.set(func(s *UpdateState) { s.Checked, s.Error = true, "GitHub недоступен: "+err.Error() })
+		return
+	}
+	resp.Body.Close()
+	page := resp.Header.Get("Location")
+	i := strings.LastIndex(page, "/tag/")
+	if resp.StatusCode/100 != 3 || i < 0 {
+		u.set(func(s *UpdateState) { s.Checked, s.Error = true, "GitHub ответил "+apiStatus })
+		return
+	}
+	tag := page[i+len("/tag/"):]
+	newer := newerVersion(tag, appVersion)
+	u.mu.Lock()
+	u.asset, u.size = "https://github.com/"+updateRepo+"/releases/download/"+tag+"/"+updateAsset, 0
+	u.st.Checked, u.st.Available, u.st.Version, u.st.Notes, u.st.URL = true, newer, tag, "", page
+	if !newer {
+		u.st.Message = "Установлена последняя версия"
+	}
+	u.mu.Unlock()
+	if newer {
+		logf("Доступна новая версия %s", tag)
+	}
 }
