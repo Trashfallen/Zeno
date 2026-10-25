@@ -62,6 +62,7 @@ type App struct {
 	ptt       *PTT
 	rdv       *Rendezvous
 	auto      *Auto
+	sounds    *Sounds
 	quitCh    chan struct{}
 	quitOnce  sync.Once
 	trayReady atomic.Bool
@@ -103,6 +104,7 @@ func main() {
 	app.ptt = newPTT(app)
 	app.rdv = newRendezvous(app)
 	app.auto = newAuto(app)
+	app.sounds = newSounds(paths.Data)
 	app.server, err = newServer(app)
 	if err != nil {
 		messageBox(appName, "Не удалось открыть локальный порт для окна: "+err.Error())
@@ -144,6 +146,7 @@ func (a *App) Quit() {
 }
 
 func (a *App) shutdown() {
+	a.sounds.Ring(false)
 	a.auto.Stop()
 	removeInstance(a.paths)
 	a.server.Stop()

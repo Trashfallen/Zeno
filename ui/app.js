@@ -639,7 +639,7 @@ async function onPeerMessage(id, m) {
       const looking = document.hasFocus() && S.view === "dm" && S.sel === id;
       if (!looking) {
         S.unread.set(id, (S.unread.get(id) || 0) + 1);
-        sfx.play("message");
+        if (S.media.sounds) api("sound", { name: "message" }).catch(() => sfx.play("message"));
         if (S.media.notifyMessages) {
           api("notify", { title: f.nick, text: msg.text }).catch(() => {});
           api("attention", { show: false }).catch(() => {});
@@ -1112,6 +1112,15 @@ $("#dmCall").onclick = () => startCall(S.sel, false);
 $("#dmVideo").onclick = () => startCall(S.sel, true);
 
 let incomingEl = null;
+let ringing = false;
+
+// ringIncoming: мелодию входящего звонка играет программа (слышно и из трея),
+// окно - только если программа не ответила
+function ringIncoming(on) {
+  if (on === ringing) return;
+  ringing = on;
+  api("ring", { on }).catch(() => { if (on) sfx.ring(true); });
+}
 
 function onCall(id, m) {
   const p = peerOf(id);
@@ -1123,7 +1132,7 @@ function onCall(id, m) {
   if (S.call) return;
   const f = fr(id);
   S.call = { id, state: "incoming", video: !!m.video, started: 0 };
-  sfx.ring(true);
+  ringIncoming(true);
   api("attention", { show: true }).catch(() => {});
   api("notify", { title: "Входящий звонок", text: f.nick + " звонит вам" }).catch(() => {});
   incomingEl = h("div", { class: "incoming" }, h("div", { class: "incoming-card" },
@@ -1171,6 +1180,7 @@ async function activateCall() {
   const c = S.call;
   clearTimeout(c.timer);
   sfx.stopRing();
+  ringIncoming(false);
   closeIncoming();
   c.state = "active";
   c.started = Date.now();
@@ -1198,6 +1208,7 @@ function endCall(reason) {
   if (!c) return;
   clearTimeout(c.timer);
   sfx.stopRing();
+  ringIncoming(false);
   closeIncoming();
   const p = peerOf(c.id);
   stopScreen(true);
@@ -1388,8 +1399,10 @@ async function tuneScreen() {
   try { await v.applyConstraints({ width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: pr.fps, max: pr.fps } }); } catch (e) { /* источник не умеет */ }
   const st = v.getSettings();
   const scale = Math.max(1, (st.width || pr.w) / pr.w, (st.height || pr.h) / pr.h);
+  // для игр - balanced: при нехватке канала или процессора понемногу снижаются и кадры,
+  // и разрешение; maintain-framerate в таких условиях скатывался до 320x180
   await p.tuneSender("screen", { maxBitrate: pr.kbps * 1000, maxFramerate: pr.fps, scaleResolutionDownBy: scale },
-    motion ? "maintain-framerate" : "maintain-resolution");
+    motion ? "balanced" : "maintain-resolution");
   if (S.screen.getAudioTracks().length) await p.tuneSender("sys", { maxBitrate: 128000 });
 }
 
@@ -1860,6 +1873,9 @@ async function statsTick() {
     if (out) {
       const src = st.src && st.src.screen;
       if (src && src.framesPerSecond != null) l.push(`захват: ${Math.round(src.framesPerSecond)} к/с`);
+      const ri = st.remoteIn[s.id];
+      if (ri && ri.fractionLost != null) l.push(`потери у друга: ${(ri.fractionLost * 100).toFixed(1)}%`);
+      if (st.availOut) l.push(`канал наружу: ${mbps(st.availOut)}`);
       l.push("кодер: " + (s.encoderImplementation || "?") + (s.powerEfficientEncoder ? " (аппаратный)" : ""));
       if (s.qualityLimitationReason && s.qualityLimitationReason !== "none") {
         l.push("упор: " + ({ bandwidth: "канал", cpu: "процессор" }[s.qualityLimitationReason] || s.qualityLimitationReason));
@@ -1867,8 +1883,10 @@ async function statsTick() {
     } else {
       l.push("декодер: " + (s.decoderImplementation || "?") + (s.powerEfficientDecoder ? " (аппаратный)" : ""));
       if (s.framesDropped) l.push("потеряно кадров: " + s.framesDropped);
+      if (s.packetsReceived) l.push(`потери пакетов: ${((100 * (s.packetsLost || 0)) / (s.packetsReceived + (s.packetsLost || 0))).toFixed(1)}%`);
     }
     l.push(`пинг: ${st.rtt ?? "?"} мс  ${{ lan: "LAN", direct: "напрямую", relay: "TURN" }[st.route] || ""}`);
+    if (st.path) l.push(`я: ${st.path.local}`, `друг: ${st.path.remote}`);
     return l.join("\n");
   };
   const mine = $('.tile[data-who="myscreen"] .stats');

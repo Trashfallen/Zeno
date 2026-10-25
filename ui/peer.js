@@ -45,7 +45,7 @@ function gathered(pc, timeout = 4000) {
 function screenBitrates(sec) {
   const pts = [...sec.matchAll(/^a=rtpmap:(\d+) ([\w-]+)\//gm)]
     .filter((m) => !/^(rtx|red|ulpfec|flexfec-03)$/i.test(m[2])).map((m) => m[1]);
-  const params = "x-google-start-bitrate=6000;x-google-min-bitrate=1500";
+  const params = "x-google-start-bitrate=6000";
   for (const pt of pts) {
     const re = new RegExp("^a=fmtp:" + pt + " (.*?)\\r?$", "m");
     if (re.test(sec)) {
@@ -300,7 +300,7 @@ export class Peer extends EventTarget {
   async stats() {
     if (!this.pc) return null;
     const r = await this.pc.getStats();
-    const out = { rtt: null, route: null, out: {}, in: {}, src: {}, codecs: {} };
+    const out = { rtt: null, route: null, path: null, availOut: null, out: {}, in: {}, src: {}, remoteIn: {}, codecs: {} };
     let pair = null;
     r.forEach((s) => {
       if (s.type === "transport" && s.selectedCandidatePairId) pair = r.get(s.selectedCandidatePairId);
@@ -313,6 +313,8 @@ export class Peer extends EventTarget {
       const types = [l && l.candidateType, rm && rm.candidateType];
       out.route = types.includes("relay") ? "relay" : (types[0] === "host" && types[1] === "host" ? "lan" : "direct");
       out.availOut = pair.availableOutgoingBitrate || null;
+      const cand = (c) => c ? `${c.address || c.ip || "?"} ${c.candidateType}${c.relayProtocol ? "/" + c.relayProtocol : ""}` : "?";
+      out.path = { local: cand(l), remote: cand(rm) };
     }
     const midSlot = {};
     for (const [k, t] of Object.entries(this.tx)) if (t.mid !== null) midSlot[t.mid] = k;
@@ -322,6 +324,7 @@ export class Peer extends EventTarget {
         if (s.mediaSourceId) out.src[midSlot[s.mid]] = r.get(s.mediaSourceId); // кадры с захвата экрана
       }
       if (s.type === "inbound-rtp" && midSlot[s.mid]) out.in[midSlot[s.mid]] = s;
+      if (s.type === "remote-inbound-rtp" && s.localId) out.remoteIn[s.localId] = s; // что друг сообщает о нашем потоке
       if (s.type === "codec") out.codecs[s.id] = s.mimeType;
     });
     return out;

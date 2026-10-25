@@ -201,6 +201,15 @@ func (s *Server) route(path string, body M) (any, error) {
 		on, _ := body["active"].(bool)
 		app.SetCaptureActive(on)
 		return nil, nil
+	case "ring":
+		on, _ := body["on"].(bool)
+		app.sounds.Ring(on)
+		return nil, nil
+	case "sound":
+		if str(body, "name") == "message" {
+			app.sounds.Message()
+		}
+		return nil, nil
 	case "fullscreen":
 		on, _ := body["on"].(bool)
 		app.window.SetFullscreen(on)
