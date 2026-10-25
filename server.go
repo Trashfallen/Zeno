@@ -94,7 +94,7 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	}
 	ct := map[string]string{
 		".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-		".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml",
+		".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".mp3": "audio/mpeg",
 	}[name[strings.LastIndex(name, "."):]]
 	if ct == "" {
 		ct = "application/octet-stream"

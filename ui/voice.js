@@ -194,9 +194,27 @@ export class Sfx {
     }
   }
 
-  // ring: входящий звонок (incoming) или гудки исходящего; повторяется до stopRing
+  // ring: входящий звонок (мелодия ring.mp3 по кругу) или гудки исходящего; играет до stopRing
   ring(incoming) {
     this.stopRing();
+    if (incoming) {
+      const a = new Audio("ring.mp3");
+      a.loop = true;
+      a.volume = 0.8;
+      if (a.setSinkId && this.sink !== "default") a.setSinkId(this.sink).catch(() => {});
+      this.ringAudio = a;
+      // мелодия не запустилась (нет файла, нет устройства) - звоним синтезатором
+      a.play().catch(() => {
+        if (this.ringAudio !== a) return;
+        this.ringAudio = null;
+        this._ringTones(true);
+      });
+      return;
+    }
+    this._ringTones(false);
+  }
+
+  _ringTones(incoming) {
     const once = () => {
       if (incoming) {
         this.tone([784, 988], 0, 0.35, 0.1, "triangle");
@@ -212,5 +230,10 @@ export class Sfx {
   stopRing() {
     clearInterval(this.ringTimer);
     this.ringTimer = null;
+    if (this.ringAudio) {
+      this.ringAudio.pause();
+      this.ringAudio.src = "";
+      this.ringAudio = null;
+    }
   }
 }
