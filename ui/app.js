@@ -2293,6 +2293,32 @@ function secNet() {
 function secApp() {
   const u = S.update || {};
   const status = h("div", { class: "rs-sub" }, u.available ? `Доступна версия ${u.version}` : (u.message || u.error || ""));
+  // кнопка одна: «Проверить обновления», а если новая версия уже найдена - сразу «Обновить»
+  const updBtn = h("button", { class: "btn small" });
+  const showBtn = () => {
+    const avail = S.update && S.update.available;
+    updBtn.className = "btn small" + (avail ? " primary" : "");
+    updBtn.textContent = avail ? `Обновить до ${S.update.version}` : "Проверить обновления";
+  };
+  updBtn.onclick = async () => {
+    if (S.update && S.update.available) {
+      if (S.call && !confirm("Обновление перезапустит Zeno и завершит звонок. Продолжить?")) return;
+      updBtn.disabled = true;
+      status.textContent = "Скачиваю обновление, Zeno перезапустится сам…";
+      try { await api("update/install"); } catch (e) { status.textContent = e.message; updBtn.disabled = false; }
+      return;
+    }
+    status.textContent = "Проверяю…";
+    updBtn.disabled = true;
+    try {
+      S.update = await api("update/check");
+      status.textContent = S.update.available ? `Доступна версия ${S.update.version}` : (S.update.message || S.update.error || "");
+      renderUpdate();
+    } catch (e) { status.textContent = e.message; }
+    updBtn.disabled = false;
+    showBtn();
+  };
+  showBtn();
   return [
     h("h2", {}, "Приложение"),
     switchRow("Сворачивать в трей при закрытии", "Крестик прячет окно, звонок и чат продолжают работать.", S.settings.close_to_tray !== false, (v) => {
@@ -2308,15 +2334,7 @@ function secApp() {
       S.settings.check_updates = v;
       api("settings", { check_updates: v }).catch(fail);
     }),
-    h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Zeno " + S.version), status),
-      h("button", { class: "btn small", onclick: async () => {
-        status.textContent = "Проверяю…";
-        try {
-          S.update = await api("update/check");
-          status.textContent = S.update.available ? `Доступна версия ${S.update.version}` : (S.update.message || S.update.error || "");
-          renderUpdate();
-        } catch (e) { status.textContent = e.message; }
-      } }, "Проверить обновления")),
+    h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Zeno " + S.version), status), updBtn),
   ];
 }
 
