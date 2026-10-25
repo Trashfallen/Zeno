@@ -1,0 +1,7 @@
+# сборка
+/dist/
+/release/
+*.syso
+*.exe
+*.lnk
+*.zip

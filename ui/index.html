@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zeno</title>
+<link rel="icon" type="image/png" sizes="64x64" href="icon-64.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- вход в закрытую бету -->
+<section class="auth" id="authScreen" hidden>
+  <form class="auth-card" id="loginForm" autocomplete="off">
+    <img class="auth-logo" src="icon-128.png" alt="">
+    <h1>Zeno</h1>
+    <p class="auth-tag">Общаться проще, чем кажется.</p>
+    <div class="beta-badge">Закрытая бета</div>
+    <label class="field"><span>Логин</span><input id="loginName" spellcheck="false" autocomplete="username" required></label>
+    <label class="field"><span>Пароль</span><input id="loginPass" type="password" autocomplete="current-password" required></label>
+    <div class="form-error" id="loginError"></div>
+    <button class="btn primary wide" id="loginBtn" type="submit">Войти</button>
+    <p class="auth-note">Логин и пароль выдает администратор беты. Входить нужно один раз.</p>
+  </form>
+
+  <form class="auth-card" id="nickForm" autocomplete="off" hidden>
+    <div class="nick-preview" id="nickPreview"></div>
+    <h1>Как вас называть?</h1>
+    <p class="auth-tag">Ник видят ваши друзья. Поменять его можно в настройках.</p>
+    <label class="field"><span>Ник</span><input id="nickInput" maxlength="32" spellcheck="false" required></label>
+    <div class="swatches" id="nickColors"></div>
+    <div class="form-error" id="nickError"></div>
+    <button class="btn primary wide" type="submit">Готово</button>
+  </form>
+</section>
+
+<!-- основное окно -->
+<div class="app" id="appScreen" hidden>
+  <nav class="rail">
+    <button class="rail-btn home active" id="railHome" title="Друзья"><img src="icon-64.png" alt=""></button>
+    <div class="rail-sep"></div>
+    <div id="railDMs" class="rail-dms"></div>
+    <button class="rail-btn add" id="railAdd" title="Добавить друга"></button>
+  </nav>
+
+  <aside class="side">
+    <div class="side-top"><div class="side-title">Zeno</div><span class="beta-chip">бета</span></div>
+    <div class="side-scroll">
+      <button class="side-item" id="navFriends"><span class="si-ico" id="navFriendsIco"></span><span>Друзья</span></button>
+      <div class="side-head"><span>Личные сообщения</span><button class="icon-btn small" id="sideAdd" title="Добавить друга"></button></div>
+      <div id="dmList"></div>
+    </div>
+
+    <div class="voice-panel" id="voicePanel" hidden>
+      <div class="vp-row">
+        <div class="vp-info">
+          <div class="vp-title" id="vpTitle">Голосовая связь подключена</div>
+          <div class="vp-sub" id="vpSub"></div>
+        </div>
+        <button class="icon-btn" id="vpHang" title="Отключиться"></button>
+      </div>
+      <div class="vp-actions">
+        <button class="vp-btn" id="vpCam" title="Камера"></button>
+        <button class="vp-btn" id="vpScreen" title="Трансляция экрана"></button>
+      </div>
+    </div>
+
+    <div class="userbar">
+      <div class="ub-me" id="ubMe"></div>
+      <button class="icon-btn" id="ubMic" title="Выключить микрофон"></button>
+      <button class="icon-btn" id="ubDeaf" title="Выключить звук"></button>
+      <button class="icon-btn" id="ubSettings" title="Настройки"></button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="banner" id="updateBanner" hidden>
+      <span id="updateText"></span>
+      <button class="btn small light" id="updateBtn">Обновить</button>
+    </div>
+
+    <!-- друзья -->
+    <section class="view" id="homeView">
+      <header class="head">
+        <span class="head-ico" id="homeIco"></span><b>Друзья</b>
+        <div class="head-sep"></div>
+        <button class="tab" data-tab="all">Все</button>
+        <button class="tab green" data-tab="add">Добавить в друзья</button>
+        <div class="spacer"></div>
+        <button class="btn small ghost" id="homePaste" title="Вставить код из буфера обмена"></button>
+      </header>
+      <div class="home-body" id="homeBody"></div>
+    </section>
+
+    <!-- разговор с другом -->
+    <section class="view" id="dmView" hidden>
+      <header class="head">
+        <div id="dmHeadAvatar"></div>
+        <b id="dmName"></b>
+        <span class="status-text" id="dmStatus"></span>
+        <div class="spacer"></div>
+        <button class="icon-btn" id="dmCall" title="Начать голосовой звонок"></button>
+        <button class="icon-btn" id="dmVideo" title="Начать видеозвонок"></button>
+        <button class="icon-btn" id="dmLink" title="Соединиться (коды)"></button>
+      </header>
+
+      <section class="stage" id="stage" hidden>
+        <div class="stage-main" id="stageMain"></div>
+        <div class="stage-strip" id="stageStrip"></div>
+        <div class="stage-bar">
+          <button class="round-btn" id="sbMic" title="Микрофон"></button>
+          <button class="round-btn" id="sbCam" title="Камера"></button>
+          <div class="split-btn">
+            <button class="round-btn" id="sbScreen" title="Трансляция экрана"></button>
+            <button class="caret-btn" id="sbScreenOpts" title="Качество трансляции"></button>
+          </div>
+          <button class="round-btn red" id="sbHang" title="Отключиться"></button>
+          <div class="sb-right">
+            <button class="round-btn ghost" id="sbStats" title="Статистика"></button>
+            <button class="round-btn ghost" id="sbFull" title="Во весь экран"></button>
+          </div>
+        </div>
+      </section>
+
+      <div class="linkbar" id="linkbar" hidden>
+        <div class="lb-text" id="lbText"></div>
+        <button class="btn small primary" id="lbOffer">Создать код</button>
+        <button class="btn small" id="lbPaste">Вставить код</button>
+      </div>
+
+      <div class="messages" id="messages"></div>
+      <div class="composer">
+        <textarea id="input" rows="1" maxlength="4000" spellcheck="true"></textarea>
+        <button class="icon-btn" id="sendBtn" title="Отправить"></button>
+      </div>
+      <div class="typing" id="typing"></div>
+    </section>
+  </main>
+</div>
+
+<div id="modals"></div>
+<div class="toasts" id="toasts"></div>
+<audio id="aVoice" autoplay></audio>
+<audio id="aSys" autoplay></audio>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

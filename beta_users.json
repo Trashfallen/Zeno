@@ -1,0 +1,24 @@
+{
+  "master": "ytH4dQ9RZPCbbpabBabO+FnRfmh/c55fmjHirpfzl/Q",
+  "users": [
+    {
+      "login": "alpha",
+      "salt": "KREFzCvI7FIroEk8G3pZFg",
+      "nonce": "edamb3nZZfS25VN5",
+      "box": "ug9TBJUBeERjZLaX9nu82t0HmgZ26BqzznTiHpRhEcjrCHImPG8wgOaYVHYDN2+CoWzI2V31fw0QWfJt8idLhqAQUsWaO9m0pfgVNlocG0k"
+    },
+    {
+      "login": "bravo",
+      "salt": "6higR8V9h79NtBK0Bviplg",
+      "nonce": "H8CLQcau3WDJIHIR",
+      "box": "kOq/N/ByAcpBCEyKw/NE+A/nMLxGgUZuvFHAdWrDHXIAk1BPbufFUjuHf3Nd6ko0Sm2wTwSqk48H3WS13c+kMgpdZEjW19DV/YLtbElcH3c"
+    },
+    {
+      "login": "charlie",
+      "salt": "GpAHxKAD4Z50nY6rh4D6Iw",
+      "nonce": "Pe3E19ELd2D5gRyc",
+      "box": "/i1h8MolbkqDJFz1P3+VIF50P1BDPOdr/wk91Xyg/Q/h0aoPy1xXALsmRa9YnjErrekvgynKAEAQn5XrzIms1sp/Rl5Khe+NhtVZKKN8DLA"
+    }
+  ],
+  "revoked": []
+}
