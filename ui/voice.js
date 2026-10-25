@@ -181,10 +181,35 @@ export class Sfx {
     }
   }
 
+  // playFile играет звук из ui/ не дольше maxSec с коротким затуханием в конце;
+  // файл декодируется один раз. Не вышло - fallback (синтезатор).
+  playFile(url, maxSec, fallback) {
+    const c = this._ctx();
+    if (!this.buffers) this.buffers = new Map();
+    if (!this.buffers.has(url)) {
+      this.buffers.set(url, fetch(url).then((r) => r.arrayBuffer()).then((b) => c.decodeAudioData(b)));
+    }
+    this.buffers.get(url).then((buf) => {
+      const dur = Math.min(buf.duration, maxSec);
+      const t = c.currentTime;
+      const src = c.createBufferSource();
+      const g = c.createGain();
+      src.buffer = buf;
+      g.gain.setValueAtTime(0.8, t);
+      g.gain.setValueAtTime(0.8, t + dur - 0.06);
+      g.gain.linearRampToValueAtTime(0, t + dur);
+      src.connect(g).connect(c.destination);
+      src.start(t, 0, dur);
+    }).catch(() => {
+      this.buffers.delete(url);
+      if (fallback) fallback();
+    });
+  }
+
   play(name) {
     if (!this.enabled) return;
     switch (name) {
-      case "message": this.tone(880, 0, 0.09, 0.07); this.tone(1320, 0.08, 0.12, 0.06); break;
+      case "message": this.playFile("message.mp3", 1.0, () => { this.tone(880, 0, 0.09, 0.07); this.tone(1320, 0.08, 0.12, 0.06); }); break;
       case "join": this.tone(523, 0, 0.12); this.tone(784, 0.1, 0.18); break;
       case "leave": this.tone(784, 0, 0.12); this.tone(523, 0.1, 0.2); break;
       case "connect": this.tone([659, 988], 0, 0.18, 0.06); break;
