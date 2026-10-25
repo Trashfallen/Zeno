@@ -61,6 +61,7 @@ type App struct {
 	updater   *Updater
 	ptt       *PTT
 	rdv       *Rendezvous
+	auto      *Auto
 	quitCh    chan struct{}
 	quitOnce  sync.Once
 	trayReady atomic.Bool
@@ -101,6 +102,7 @@ func main() {
 	app.window = newWindow(app)
 	app.ptt = newPTT(app)
 	app.rdv = newRendezvous(app)
+	app.auto = newAuto(app)
 	app.server, err = newServer(app)
 	if err != nil {
 		messageBox(appName, "Не удалось открыть локальный порт для окна: "+err.Error())
@@ -113,10 +115,12 @@ func main() {
 	}
 	app.updater.startBackground(func() bool { return app.cfg.Bool("check_updates") })
 	go app.ptt.run()
-
-	if !*minimized {
-		app.window.Show()
+	if acc := app.profiles.Current(); acc != nil {
+		app.auto.Start(acc) // друзья найдут нас, даже пока окно спрятано
 	}
+
+	// окно создается всегда: в нем живет WebRTC. Из автозапуска - сразу спрятанным в трей
+	app.window.Open(*minimized)
 	app.runTray() // до выхода
 	app.shutdown()
 }
@@ -140,6 +144,7 @@ func (a *App) Quit() {
 }
 
 func (a *App) shutdown() {
+	a.auto.Stop()
 	removeInstance(a.paths)
 	a.server.Stop()
 }

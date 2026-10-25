@@ -78,6 +78,8 @@ type Window struct {
 	origProc uintptr
 	hinted   bool
 	full     *fullState // не nil - окно развернуто во весь экран
+
+	startHidden bool
 }
 
 type fullState struct {
@@ -99,6 +101,14 @@ func (win *Window) hwnd() uintptr {
 	win.mu.Lock()
 	defer win.mu.Unlock()
 	return win.h
+}
+
+// Open создает окно при запуске; hidden - сразу спрятать в трей (автозапуск).
+func (win *Window) Open(hidden bool) {
+	win.mu.Lock()
+	win.startHidden = hidden
+	win.mu.Unlock()
+	win.Show()
 }
 
 // Show открывает окно или выводит уже открытое вперед.
@@ -143,6 +153,11 @@ func (win *Window) run() {
 	}
 	allowMedia(w)
 	h := uintptr(w.Window())
+	win.mu.Lock()
+	if win.startHidden {
+		procShowWindow.Call(h, swHide) // окно уже показалось при создании - убираем сразу
+	}
+	win.mu.Unlock()
 	win.restorePlacement(h)
 	w.SetSize(940, 560, webview2.HintMin)
 	setDarkTitle(h, true)
@@ -151,8 +166,14 @@ func (win *Window) run() {
 
 	win.mu.Lock()
 	win.w, win.h, win.opening = w, h, false
+	hidden := win.startHidden
+	win.startHidden = false
 	win.mu.Unlock()
-	focusWindow(h)
+	if hidden {
+		procShowWindow.Call(h, swHide)
+	} else {
+		focusWindow(h)
+	}
 	w.Run()
 	w.Destroy()
 	win.mu.Lock()

@@ -121,7 +121,7 @@ export class Peer extends EventTarget {
     pc.onconnectionstatechange = () => {
       if (pc !== this.pc) return;
       const s = pc.connectionState;
-      if (s === "failed" || s === "closed") this._lost();
+      if (s === "failed" || s === "closed") this._lost("ice " + s);
       else if (s === "disconnected" && this.connected) this._setState("unstable");
       else if (s === "connected" && this.state === "unstable") this._setState("connected");
     };
@@ -178,7 +178,7 @@ export class Peer extends EventTarget {
       this._setState("connected");
       if (this.role === "offerer") this._addMedia();
     };
-    dc.onclose = () => { if (dc === this.dc) this._lost(); };
+    dc.onclose = () => { if (dc === this.dc) this._lost("канал закрыт"); };
     dc.onmessage = (e) => {
       let m;
       try { m = JSON.parse(e.data); } catch (err) { return; }
@@ -329,10 +329,10 @@ export class Peer extends EventTarget {
 
   // ---------- конец ----------
 
-  _lost() {
+  _lost(why) {
     const was = this.connected;
     this.close(true);
-    if (was) this.emit("lost");
+    if (was) this.emit("lost", why);
   }
 
   close(silent) {

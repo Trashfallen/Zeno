@@ -602,3 +602,41 @@ body.theater .stage-strip .tile.small { box-shadow: 0 6px 24px rgba(0, 0, 0, .55
 .stage.idle .vol-badge { opacity: 0 !important; pointer-events: none; }
 .stage.idle, .stage.idle * { cursor: none !important; }
 .tile-label, .live, .vol-badge { transition: opacity .25s; }
+
+/* ---------- панель звонка (как в Discord) ---------- */
+
+.stage-bar { justify-content: space-between; gap: 12px; padding: 0 12px; }
+.bar-center { display: flex; align-items: center; gap: 8px; position: absolute; left: 50%; transform: translateX(-50%); }
+.bar-group {
+  display: flex; align-items: center; gap: 2px; height: 48px; padding: 4px; border-radius: 12px;
+  background: #18191c; border: 1px solid #2b2d31; box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+}
+.bar-btn {
+  width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center; color: #dbdee1;
+  transition: background .12s, color .12s;
+}
+.bar-btn:hover { background: #2b2d31; color: #fff; }
+.bar-btn.off { color: var(--red); }
+.bar-btn.on { background: rgba(35, 165, 90, .18); color: #3ee07f; }
+.bar-btn.on:hover { background: rgba(35, 165, 90, .28); }
+.bar-btn:disabled { opacity: .35; cursor: not-allowed; background: none; }
+.bar-caret {
+  width: 22px; height: 40px; margin-left: -4px; margin-right: 2px; border-radius: 6px; display: grid; place-items: center;
+  color: #949ba4; transition: background .12s, color .12s;
+}
+.bar-caret:hover { background: #2b2d31; color: #fff; }
+.bar-hang {
+  width: 64px; height: 48px; border-radius: 12px; display: grid; place-items: center; color: #fff;
+  background: #da373c; box-shadow: 0 4px 14px rgba(218, 55, 60, .35); transition: background .12s, transform .08s;
+}
+.bar-hang:hover { background: #a12828; }
+.bar-hang:active, .bar-btn:active { transform: scale(.95); }
+.bar-icon {
+  width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; color: #b5bac1;
+  transition: background .12s, color .12s;
+}
+.bar-icon:hover { background: rgba(255, 255, 255, .08); color: #fff; }
+.bar-icon.on { color: #3ee07f; }
+.bar-right { display: flex; gap: 4px; margin-left: auto; }
+.stage-strip.collapsed { display: none; }
+body.theater .stage-strip.collapsed { display: flex; }

@@ -36,13 +36,6 @@
 
 <!-- основное окно -->
 <div class="app" id="appScreen" hidden>
-  <nav class="rail">
-    <button class="rail-btn home active" id="railHome" title="Друзья"><img src="icon-64.png" alt=""></button>
-    <div class="rail-sep"></div>
-    <div id="railDMs" class="rail-dms"></div>
-    <button class="rail-btn add" id="railAdd" title="Добавить друга"></button>
-  </nav>
-
   <aside class="side">
     <div class="side-top"><div class="side-title">Zeno</div><span class="beta-chip">бета</span></div>
     <div class="side-scroll">
@@ -108,17 +101,25 @@
         <div class="stage-main" id="stageMain"></div>
         <div class="stage-strip" id="stageStrip"></div>
         <div class="stage-bar">
-          <button class="round-btn" id="sbMic" title="Микрофон"></button>
-          <button class="round-btn" id="sbCam" title="Камера"></button>
-          <div class="split-btn">
-            <button class="round-btn" id="sbScreen" title="Трансляция экрана"></button>
-            <button class="caret-btn" id="sbScreenOpts" title="Качество трансляции"></button>
+          <button class="bar-icon" id="sbCollapse" title="Скрыть участников"></button>
+          <div class="bar-center">
+            <div class="bar-group">
+              <button class="bar-btn" id="sbMic" title="Микрофон"></button>
+              <button class="bar-caret" id="sbMicOpts" title="Устройства звука"></button>
+              <button class="bar-btn" id="sbCam" title="Камера"></button>
+              <button class="bar-caret" id="sbCamOpts" title="Камера: устройство и качество"></button>
+            </div>
+            <div class="bar-group">
+              <button class="bar-btn" id="sbScreen" title="Транслировать экран"></button>
+              <button class="bar-btn" id="sbScreenOpts" title="Качество трансляции"></button>
+              <button class="bar-btn" id="sbMore" title="Еще"></button>
+            </div>
+            <button class="bar-hang" id="sbHang" title="Отключиться"></button>
           </div>
-          <button class="round-btn red" id="sbHang" title="Отключиться"></button>
-          <div class="sb-right">
-            <button class="round-btn ghost" id="sbStrip" title="Показать участников"></button>
-            <button class="round-btn ghost" id="sbStats" title="Статистика"></button>
-            <button class="round-btn ghost" id="sbFull" title="Во весь экран"></button>
+          <div class="bar-right">
+            <button class="bar-icon" id="sbVolume" title="Громкость"></button>
+            <button class="bar-icon" id="sbStats" title="Статистика"></button>
+            <button class="bar-icon" id="sbFull" title="Во весь экран"></button>
           </div>
         </div>
         <div class="stage-resizer" id="stageResizer" title="Потяните, чтобы изменить высоту. Двойной клик - как было"><i></i></div>

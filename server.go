@@ -169,12 +169,15 @@ func (s *Server) route(path string, body M) (any, error) {
 	case "state":
 		return s.state(), nil
 	case "login":
-		if _, err := app.profiles.Login(str(body, "login"), str(body, "password")); err != nil {
+		acc, err := app.profiles.Login(str(body, "login"), str(body, "password"))
+		if err != nil {
 			return nil, err
 		}
+		app.auto.Start(acc)
 		_ = app.cfg.Set(M{"last_login": str(body, "login")})
 		return s.state(), nil
 	case "logout":
+		app.auto.Stop()
 		return nil, app.profiles.Logout()
 	case "settings":
 		if err := app.cfg.Set(body); err != nil {
@@ -245,9 +248,24 @@ func (s *Server) route(path string, body M) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		app.auto.Sync()
 		return M{"friend": fr, "friends": acc.Friends()}, nil
 	case "friends/remove":
-		return M{"friends": acc.Friends()}, acc.RemoveFriend(str(body, "id"))
+		err := acc.RemoveFriend(str(body, "id"))
+		app.auto.Sync()
+		return M{"friends": acc.Friends()}, err
+	case "peer/state":
+		logf("Соединение с %s: %s", short8(str(body, "friend")), str(body, "state"))
+		return nil, nil
+	case "auto/poll":
+		ms, _ := body["timeout"].(float64)
+		if ms <= 0 || ms > 30000 {
+			ms = 25000
+		}
+		return M{"events": app.auto.Poll(time.Duration(ms) * time.Millisecond), "online": app.auto.Online()}, nil
+	case "auto/send":
+		reply, _ := body["reply"].(bool)
+		return nil, app.auto.Send(str(body, "to"), str(body, "kind"), str(body, "data"), reply)
 	case "friends/update":
 		if err := acc.UpdateFriend(str(body, "id"), str(body, "nick"), str(body, "color")); err != nil {
 			return nil, err

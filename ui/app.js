@@ -149,13 +149,13 @@ function showApp() {
     setInterval(fastTick, 100);
     setInterval(statsTick, 1000);
     setInterval(refreshUpdate, 10 * 60 * 1000);
+    autoLoop();
     if (!S.friends.length) S.homeTab = "add";
   }
   renderAll();
 }
 
 function staticIcons() {
-  $("#railAdd").innerHTML = icon("plus", 24);
   $("#sideAdd").innerHTML = icon("plus", 16);
   $("#navFriendsIco").innerHTML = icon("users", 22);
   $("#homeIco").innerHTML = icon("users", 22);
@@ -166,15 +166,17 @@ function staticIcons() {
   $("#dmLink").innerHTML = icon("link", 20);
   $("#sendBtn").innerHTML = icon("send", 20);
   $("#vpHang").innerHTML = icon("hang", 22);
-  $("#sbHang").innerHTML = icon("hang", 26);
-  $("#sbScreenOpts").innerHTML = icon("down", 16);
+  $("#sbHang").innerHTML = icon("hang", 24);
+  $("#sbScreenOpts").innerHTML = icon("sliders", 20);
+  $("#sbMore").innerHTML = icon("dots", 20);
+  $("#sbMicOpts").innerHTML = icon("down", 14);
+  $("#sbCamOpts").innerHTML = icon("down", 14);
   $("#sbStats").innerHTML = icon("info", 20);
-  $("#sbStrip").innerHTML = icon("users", 20);
+  $("#sbVolume").innerHTML = icon("volume", 20);
 }
 
 function renderAll() {
   if (!S.me) return;
-  renderRail();
   renderSide();
   renderUserbar();
   renderVoicePanel();
@@ -187,9 +189,9 @@ function renderAll() {
 
 function statusText(st) {
   return {
-    connected: "в сети", unstable: "связь нестабильна", offer: "ждет вашего кода-ответа",
-    answer: "ждем, пока друг вставит ответ", connecting: "соединение…", offline: "нет соединения",
-  }[st] || "нет соединения";
+    connected: "в сети", unstable: "связь нестабильна", offer: "соединение…",
+    answer: "соединение…", connecting: "соединение…", offline: S.netOnline === 0 ? "нет связи с серверами" : "не в сети",
+  }[st] || "не в сети";
 }
 
 function dotClass(st) {
@@ -200,19 +202,6 @@ function dotClass(st) {
 
 function avatarWithDot(person, size, st) {
   return h("div", { class: "av-wrap" }, avatar(person, size), h("span", { class: "dot " + dotClass(st) }));
-}
-
-function renderRail() {
-  $("#railHome").classList.toggle("active", S.view === "home");
-  const ids = S.friends.filter((f) => (S.unread.get(f.id) || 0) > 0 || (S.call && S.call.id === f.id)).map((f) => f.id);
-  $("#railDMs").replaceChildren(...ids.map((id) => {
-    const f = fr(id);
-    const n = S.unread.get(id) || 0;
-    return h("button", {
-      class: "rail-btn" + (S.view === "dm" && S.sel === id ? " active" : "") + (n ? " unread" : ""),
-      title: f.nick, onclick: () => openDM(id),
-    }, avatar(f, 48), n ? h("span", { class: "badge" }, n) : null);
-  }));
 }
 
 function renderSide() {
@@ -304,9 +293,7 @@ function openHome(tab) {
   renderAll();
 }
 
-$("#railHome").onclick = () => openHome();
 $("#navFriends").onclick = () => openHome();
-$("#railAdd").onclick = () => openHome("add");
 $("#sideAdd").onclick = () => openHome("add");
 $$(".tab").forEach((t) => (t.onclick = () => openHome(t.dataset.tab)));
 $("#homePaste").onclick = () => pasteFromClipboard();
@@ -431,11 +418,11 @@ function renderDM() {
   const lb = $("#linkbar");
   lb.hidden = on;
   if (!on) {
-    const txt = {
-      offer: `Код отправлен. Когда <b>${esc(f.nick)}</b> пришлет код-ответ, нажмите «Вставить код».`,
-      answer: `Отправьте код-ответ <b>${esc(f.nick)}</b> - соединение установится, когда он его вставит.`,
-      connecting: "Соединяюсь…",
-    }[st] || `Нет соединения с <b>${esc(f.nick)}</b>. Создайте код и отправьте другу или вставьте код от него.`;
+    const txt = ["offer", "answer", "connecting"].includes(st)
+      ? `Соединяюсь с <b>${esc(f.nick)}</b>…`
+      : S.netOnline !== 0
+        ? `<b>${esc(f.nick)}</b> не в сети. Как только он запустит Zeno, вы соединитесь сами.`
+        : `Нет связи с публичными серверами - автосоединение не работает. Можно соединиться кодом.`;
     $("#lbText").innerHTML = txt;
   }
 
@@ -576,7 +563,7 @@ function getPeer(id) {
   p.addEventListener("state", (e) => onPeerState(id, e.detail));
   p.addEventListener("message", (e) => onPeerMessage(id, e.detail).catch(fail));
   p.addEventListener("media", () => onPeerMedia(id));
-  p.addEventListener("lost", () => onPeerLost(id));
+  p.addEventListener("lost", (e) => onPeerLost(id, e.detail));
   S.peers.set(id, p);
   return p;
 }
@@ -584,7 +571,13 @@ function getPeer(id) {
 function onPeerState(id, st) {
   const f = fr(id);
   const p = peerOf(id);
+  api("peer/state", { friend: id, state: st }).catch(() => {});
   if (p && st !== "connected" && st !== "unstable") p.helloSent = false;
+  if (st === "connected" && p && !p.connectedAt) {
+    p.connectedAt = Date.now();
+    p.autoAt = 0; // соединились - следующая попытка (после обрыва) может идти сразу
+  }
+  if (p && st === "offline") p.connectedAt = 0;
   if (st === "connected") {
     if (!p.helloSent) {
       p.helloSent = true;
@@ -598,13 +591,18 @@ function onPeerState(id, st) {
   renderAll();
 }
 
-function onPeerLost(id) {
+function onPeerLost(id, why) {
   const f = fr(id);
   const p = peerOf(id);
-  if (p) p.helloSent = false;
+  api("peer/state", { friend: id, state: "lost: " + (why || "?") }).catch(() => {});
+  if (p) {
+    p.helloSent = false;
+    p.autoAt = 0;
+  }
   S.remote.delete(id);
   if (S.call && S.call.id === id) endCall("Соединение потеряно");
-  if (f) toast(`Соединение с ${f.nick} потеряно`, "err");
+  if (f) toast(`Соединение с ${f.nick} потеряно, переподключаюсь…`, "err");
+  setTimeout(() => autoReconnect(id), 1500);
   renderAll();
 }
 
@@ -646,7 +644,6 @@ async function onPeerMessage(id, m) {
           api("notify", { title: f.nick, text: msg.text }).catch(() => {});
           api("attention", { show: false }).catch(() => {});
         }
-        renderRail();
         renderSide();
       }
       renderTyping();
@@ -688,6 +685,112 @@ async function onPeerMessage(id, m) {
   }
 }
 
+// ---------- автосоединение ----------
+// Друзья добавлены один раз - дальше программы находят друг друга сами через
+// зашифрованный канал пары на публичных серверах (auto.go). Предложение
+// всегда делает тот, у кого ключ меньше: так встречные попытки не сталкиваются.
+
+S.netOnline = null; // null - еще не знаем (первые секунды после запуска)
+
+// autoBusy: попытка соединения уже идет (или шла меньше 25 с назад) - вторую не начинаем
+function autoBusy(p) {
+  return !!p.autoAt && Date.now() - p.autoAt < 25000;
+}
+
+function autoHello(id, reply = false) {
+  api("auto/send", { to: id, kind: "hello", reply }).catch(() => {});
+}
+
+let lastHelloAll = 0;
+
+function autoHelloAll() {
+  if (Date.now() - lastHelloAll < 3000) return; // серверы подключаются пачкой - не звать друзей на каждый
+  lastHelloAll = Date.now();
+  for (const f of S.friends) {
+    const p = getPeer(f.id);
+    if (!p.connected && !autoBusy(p)) autoHello(f.id);
+  }
+}
+
+function autoReconnect(id) {
+  const p = fr(id) && getPeer(id);
+  if (!p || p.connected || autoBusy(p)) return;
+  if (S.me.id < id) autoOffer(id);
+  else autoHello(id);
+}
+
+async function autoOffer(id) {
+  const p = getPeer(id);
+  if (p.connected || autoBusy(p)) return;
+  p.autoAt = Date.now();
+  try {
+    const code = await p.makeOffer();
+    await api("auto/send", { to: id, kind: "offer", data: code });
+  } catch (e) {
+    console.warn("автосоединение:", e);
+  }
+}
+
+async function onAuto(ev) {
+  if (ev.kind === "broker") return autoHelloAll();
+  const id = ev.from;
+  if (!fr(id)) return;
+  const p = getPeer(id);
+  if (ev.kind === "hello") {
+    if (p.connected) {
+      // друг зовет - значит, у него соединения нет (перезапустился), наше уже мертвое
+      if (Date.now() - (p.connectedAt || 0) < 8000) return;
+      if (S.call && S.call.id === id) endCall("Соединение потеряно");
+      p.close(true);
+    }
+    if (S.me.id < id) autoOffer(id);
+    else if (!ev.reply) autoHello(id, true);
+  } else if (ev.kind === "offer") {
+    // предложения от друга идут по нарастающей: старое или повтор (с другого сервера) пропускаем
+    if (ev.ts && ev.ts <= (p.lastOfferTs || 0)) return;
+    p.lastOfferTs = ev.ts || Date.now();
+    const inv = await api("invite/open", { code: ev.data });
+    if (S.call && S.call.id === id) endCall();
+    p.autoAt = Date.now();
+    const code = await p.acceptOffer(inv);
+    await api("auto/send", { to: id, kind: "answer", data: code });
+  } else if (ev.kind === "answer") {
+    const inv = await api("invite/open", { code: ev.data });
+    if (p.role === "offerer" && p.nonce === inv.nonce && p.pc && p.pc.signalingState === "have-local-offer") {
+      await p.acceptAnswer(inv);
+    }
+  }
+}
+
+let autoStarted = false;
+let autoStartedAt = 0;
+
+async function autoLoop() {
+  if (autoStarted) return;
+  autoStarted = true;
+  autoStartedAt = Date.now();
+  setTimeout(autoHelloAll, 1000);
+  setInterval(autoHelloAll, 30000);
+  for (let first = true; ; first = false) {
+    let r = null;
+    try {
+      r = await api("auto/poll", { timeout: first ? 3000 : 25000 });
+    } catch (e) {
+      await sleep(3000);
+      continue;
+    }
+    // первые 15 с серверы еще подключаются - «нет связи» не показываем
+    const online = r.online === 0 && Date.now() - autoStartedAt < 15000 ? null : r.online;
+    if (online !== S.netOnline) {
+      const was = S.netOnline;
+      S.netOnline = online;
+      if (!was && r.online) autoHelloAll();
+      renderAll();
+    }
+    for (const ev of r.events || []) onAuto(ev).catch((e) => console.warn("автосоединение:", e));
+  }
+}
+
 // ---------- коды ----------
 
 async function handleCode(raw, opts) {
@@ -695,6 +798,7 @@ async function handleCode(raw, opts) {
   if (text.startsWith("ZENO-FRIEND:")) {
     const r = await api("friends/add", { code: text });
     S.friends = r.friends;
+    setTimeout(() => autoReconnect(r.friend.id), 1500);
     toast(`${r.friend.nick} теперь в друзьях`, "ok");
     S.homeTab = "all";
     openDM(r.friend.id);
@@ -1476,25 +1580,26 @@ function renderStage() {
     main.replaceChildren(tiles.them, tiles.me);
     strip.replaceChildren();
   }
-  // во весь экран участники скрыты - только трансляция; кнопка показывает их поверх
-  const stripBtn = $("#sbStrip");
-  stripBtn.hidden = !(isTheater() && screens.length);
-  stripBtn.classList.toggle("on", S.showStrip);
-  stripBtn.title = S.showStrip ? "Скрыть участников" : "Показать участников";
-  strip.classList.toggle("collapsed", isTheater() && !S.showStrip);
+  // участников под трансляцией можно скрыть; во весь экран они скрыты, пока не попросишь
+  strip.classList.toggle("collapsed", stripHidden());
 
   const sbMic = $("#sbMic");
-  sbMic.innerHTML = icon(S.muted || S.deaf ? "micOff" : "mic", 24);
+  sbMic.innerHTML = icon(S.muted || S.deaf ? "micOff" : "mic", 20);
   sbMic.classList.toggle("off", S.muted || S.deaf);
+  sbMic.title = S.muted || S.deaf ? "Включить микрофон" : "Выключить микрофон";
   const sbCam = $("#sbCam");
-  sbCam.innerHTML = icon(S.cam ? "video" : "videoOff", 24);
+  sbCam.innerHTML = icon(S.cam ? "video" : "videoOff", 20);
   sbCam.classList.toggle("on", !!S.cam);
+  sbCam.title = S.cam ? "Выключить камеру" : "Включить камеру";
   const sbScr = $("#sbScreen");
-  sbScr.innerHTML = icon(S.screen ? "screenOff" : "screen", 24);
+  sbScr.innerHTML = icon(S.screen ? "screenOff" : "screen", 20);
   sbScr.classList.toggle("on", !!S.screen);
   sbScr.title = S.screen ? "Остановить трансляцию" : "Транслировать экран";
   sbCam.disabled = sbScr.disabled = c.state !== "active";
   $("#sbStats").classList.toggle("on", S.showStats);
+  $("#sbCollapse").innerHTML = icon(stripHidden() ? "up" : "down", 20);
+  $("#sbCollapse").title = stripHidden() ? "Показать участников" : "Скрыть участников";
+  $("#sbCollapse").hidden = !screens.length;
   $("#sbFull").innerHTML = icon(S.full ? "shrink" : "expand", 20);
   $("#sbFull").title = S.full ? "Выйти из полноэкранного (Esc)" : "Во весь экран";
   applyStageHeight();
@@ -1626,9 +1731,64 @@ function applyStageHeight() {
 })();
 
 $("#sbFull").onclick = () => setFull(!S.full);
-$("#sbStrip").onclick = () => {
-  S.showStrip = !S.showStrip;
+// stripHidden: в обычном виде участники видны, пока их не скрыли; во весь экран - наоборот
+S.hideStrip = false;
+const stripHidden = () => (isTheater() ? !S.showStrip : S.hideStrip);
+
+$("#sbCollapse").onclick = () => {
+  if (isTheater()) S.showStrip = !S.showStrip;
+  else S.hideStrip = !S.hideStrip;
   renderStage();
+};
+
+async function deviceItems(kind, current, key) {
+  const list = await deviceList(kind);
+  return list.map(([id, label]) => menuItem(label, id === current, () => setMedia({ [key]: id })));
+}
+
+$("#sbMicOpts").onclick = async (e) => {
+  const anchor = e.currentTarget;
+  const [ins, outs] = await Promise.all([deviceItems("audioinput", S.media.input, "input"), deviceItems("audiooutput", S.media.output, "output")]);
+  openMenu(anchor, [
+    h("div", { class: "menu-title" }, "Микрофон"), ...ins,
+    h("div", { class: "menu-sep" }), h("div", { class: "menu-title" }, "Динамики"), ...outs,
+    h("div", { class: "menu-sep" }),
+    menuSlider("Громкость микрофона", S.media.inputVolume, (x) => setMedia({ inputVolume: x })),
+    menuItem("Настройки голоса", false, () => openSettings("voice")),
+  ], "up");
+};
+
+$("#sbCamOpts").onclick = async (e) => {
+  const anchor = e.currentTarget;
+  const cams = await deviceItems("videoinput", S.media.camera, "camera");
+  openMenu(anchor, [
+    h("div", { class: "menu-title" }, "Камера"), ...cams,
+    h("div", { class: "menu-sep" }), h("div", { class: "menu-title" }, "Качество"),
+    ...["480p", "720p", "1080p"].map((r) => menuItem(r, S.media.camRes === r, () => setMedia({ camRes: r }))),
+  ], "up");
+};
+
+$("#sbMore").onclick = (e) => {
+  const scr = S.screen ? "myscreen" : (S.call && (S.remote.get(S.call.id) || {}).screen ? "theirscreen" : null);
+  openMenu(e.currentTarget, [
+    menuItem(isTheater() && !S.full ? "Обычный вид" : "Во всё окно", false, () => setTheater(!(isTheater() && !S.full))),
+    menuItem("Статистика", S.showStats, () => { S.showStats = !S.showStats; renderStage(); }),
+    scr ? menuItem("Сохранить кадр трансляции", false, () => snapshot(scr).catch(fail)) : null,
+    h("div", { class: "menu-sep" }),
+    menuItem("Настройки голоса и видео", false, () => openSettings("voice")),
+  ], "up");
+};
+
+$("#sbVolume").onclick = (e) => {
+  if (!S.call) return;
+  const id = S.call.id;
+  const v = vol(id);
+  openMenu(e.currentTarget, [
+    menuSlider("Громкость " + fr(id).nick, v.voice, (x) => setVol(id, { voice: x, voiceMuted: false })),
+    menuSlider("Громкость трансляции", v.stream, (x) => setVol(id, { stream: x, streamMuted: false })),
+    h("div", { class: "menu-sep" }),
+    menuItem(S.deaf ? "Включить звук" : "Выключить весь звук", S.deaf, () => setDeaf(!S.deaf)),
+  ], "up");
 };
 
 // во весь экран кнопки и подписи прячутся, пока мышь не двигается (как в Discord)
@@ -2155,7 +2315,6 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("focus", () => {
   if (S.view === "dm" && S.unread.has(S.sel)) {
     S.unread.delete(S.sel);
-    renderRail();
     renderSide();
   }
 });

@@ -8,7 +8,7 @@ package main
 // из их ключей Ed25519): брокер видит только шум, и даже подобрав код, без
 // закрытого ключа одного из друзей ящик не открыть. Сообщения retained -
 // второй может ввести код в любой момент в течение часа. После соединения
-// ящик очищается. Брокеров несколько, работают параллельно, побеждает первый.
+// ящик очищается. Серверов несколько (transport.go), работают параллельно.
 
 import (
 	"crypto/aes"
@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"filippo.io/edwards25519"
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 const (
@@ -34,13 +33,6 @@ const (
 	shortLen      = 6
 	rdvLifetime   = time.Hour
 )
-
-var defaultBrokers = []string{
-	"tcp://broker.emqx.io:1883",
-	"tcp://broker.hivemq.com:1883",
-	"tcp://test.mosquitto.org:1883",
-	"tcp://mqtt.eclipseprojects.io:1883",
-}
 
 // normShort: «k7q-2m9» -> «K7Q2M9»; пусто, если это не короткий код.
 func normShort(s string) string {
@@ -134,33 +126,18 @@ func (a *Account) rdvOpen(short, topic string, data []byte) (string, string, boo
 	return "", "", false
 }
 
-// ---------- ящик на брокерах ----------
+// ---------- ящик на публичных серверах ----------
 
 type rdvBox struct {
 	short, topic, friend string
 	mu                   sync.Mutex
-	clients              []mqtt.Client
+	ts                   []transport
+	subs                 []string // на что подписан ящик
+	offer                []byte   // что лежит в ящике (у того, кто его создал)
 	closed               bool
 	got                  chan string // расшифрованный длинный код от друга
 	once                 sync.Once
 	created              time.Time
-}
-
-// add запоминает подключенного брокера; ящик уже закрыт - отключает его.
-func (b *rdvBox) add(c mqtt.Client) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		c.Disconnect(0)
-		return
-	}
-	b.clients = append(b.clients, c)
-}
-
-func (b *rdvBox) list() []mqtt.Client {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]mqtt.Client(nil), b.clients...)
 }
 
 type Rendezvous struct {
@@ -188,10 +165,13 @@ func newRendezvous(app *App) *Rendezvous {
 
 func (r *Rendezvous) brokers() []string {
 	var out []string
-	for _, l := range strings.Split(r.app.cfg.Str("brokers"), "\n") {
-		if l = strings.TrimSpace(l); strings.HasPrefix(l, "tcp://") || strings.HasPrefix(l, "ssl://") ||
-			strings.HasPrefix(l, "ws://") || strings.HasPrefix(l, "wss://") {
-			out = append(out, l)
+	for _, l := range strings.Fields(r.app.cfg.Str("brokers")) {
+		l = strings.TrimSpace(l)
+		for _, p := range []string{"tcp://", "ssl://", "ws://", "wss://", "https://", "http://"} {
+			if strings.HasPrefix(l, p) {
+				out = append(out, l)
+				break
+			}
 		}
 	}
 	if len(out) == 0 {
@@ -200,48 +180,65 @@ func (r *Rendezvous) brokers() []string {
 	return out
 }
 
-// connect подключает ящик ко всем брокерам параллельно; onConnect зовется на
-// каждом (и после переподключения). Ждет не всех: через 1,5 с после первого
-// успешного возвращается, опоздавшие добавляются в ящик позже - у друга мог
-// ответить другой брокер. Возвращает, сколько подключилось к этому моменту.
-func (r *Rendezvous) connect(b *rdvBox, onConnect func(mqtt.Client)) int {
-	brokers := r.brokers()
-	done := make(chan bool, len(brokers))
-	for _, broker := range brokers {
-		go func() {
-			id := make([]byte, 8)
-			_, _ = rand.Read(id)
-			opts := mqtt.NewClientOptions().AddBroker(broker).SetClientID("zeno-" + hex.EncodeToString(id)).
-				SetConnectTimeout(7 * time.Second).SetKeepAlive(30 * time.Second).SetCleanSession(true).
-				SetAutoReconnect(true).SetConnectRetry(false).SetOnConnectHandler(onConnect)
-			c := mqtt.NewClient(opts)
-			t := c.Connect()
-			if !t.WaitTimeout(8*time.Second) || t.Error() != nil {
-				logf("MQTT %s: не подключился: %v", broker, t.Error())
-				c.Disconnect(0)
-				done <- false
-				return
+// connect подключает ящик ко всем серверам параллельно. Ждет не всех: через
+// 1,5 с после первого ответившего возвращается; опоздавшие подключатся в фоне -
+// у друга мог ответить другой сервер. Возвращает, сколько готово к этому моменту.
+func (r *Rendezvous) connect(b *rdvBox, onMsg func(topic string, payload []byte)) int {
+	ready := make(chan struct{}, 16)
+	onReady := func(t transport) {
+		b.mu.Lock()
+		subs, offer, closed := b.subs, b.offer, b.closed
+		b.mu.Unlock()
+		if closed {
+			return
+		}
+		t.SetTopics(subs)
+		if offer != nil {
+			if err := t.Publish(b.topic+"/o", offer, true); err != nil {
+				logf("Короткий код через %s: %v", t.Name(), err)
 			}
-			b.add(c)
-			done <- true
-		}()
-	}
-	n := 0
-	var grace <-chan time.Time
-	for pending := len(brokers); pending > 0; pending-- {
+		}
 		select {
-		case ok := <-done:
-			if ok {
-				n++
-				if grace == nil {
-					grace = time.After(1500 * time.Millisecond)
-				}
-			}
-		case <-grace:
-			return n
+		case ready <- struct{}{}:
+		default:
+		}
+	}
+	b.mu.Lock()
+	for _, url := range r.brokers() {
+		b.ts = append(b.ts, dialTransport(url, rdvLifetime, onReady, onMsg))
+	}
+	b.mu.Unlock()
+	deadline := time.After(10 * time.Second)
+	select {
+	case <-ready:
+	case <-deadline:
+		b.logFailures()
+		return 0
+	}
+	time.Sleep(1500 * time.Millisecond)
+	return b.readyCount()
+}
+
+func (b *rdvBox) readyCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, t := range b.ts {
+		if t.Ready() {
+			n++
 		}
 	}
 	return n
+}
+
+func (b *rdvBox) logFailures() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, t := range b.ts {
+		if !t.Ready() {
+			logf("Короткий код: %s не отвечает", t.Name())
+		}
+	}
 }
 
 func (b *rdvBox) deliver(code string) {
@@ -251,26 +248,26 @@ func (b *rdvBox) deliver(code string) {
 	}
 }
 
-// close отключается от брокеров; clear - стереть содержимое ящика.
+// close отключается от серверов; clear - стереть содержимое ящика.
 func (b *rdvBox) close(clear bool) {
 	b.once.Do(func() {
 		b.mu.Lock()
 		b.closed = true
-		clients := b.clients
+		ts := b.ts
 		b.mu.Unlock()
-		for _, c := range clients {
+		for _, t := range ts {
 			if clear {
-				c.Publish(b.topic+"/o", 1, true, []byte{}).WaitTimeout(3 * time.Second)
-				c.Publish(b.topic+"/a", 1, true, []byte{}).WaitTimeout(3 * time.Second)
+				t.Clear(b.topic + "/o")
+				t.Clear(b.topic + "/a")
 			}
-			c.Disconnect(500)
+			t.Close()
 		}
 	})
 }
 
 func (r *Rendezvous) put(b *rdvBox) {
 	r.mu.Lock()
-	if old := r.boxes[b.short]; old != nil {
+	if old := r.boxes[b.short]; old != nil && old != b {
 		go old.close(false)
 	}
 	r.boxes[b.short] = b
@@ -283,6 +280,8 @@ func (r *Rendezvous) box(short string) *rdvBox {
 	return r.boxes[normShort(short)]
 }
 
+const unreachable = "не удалось связаться ни с одним публичным сервером (возможно, их блокирует провайдер или VPN)"
+
 // Offer кладет длинный код-предложение в ящик и ждет там ответ. Возвращает короткий код.
 func (r *Rendezvous) Offer(acc *Account, to, longCode string) (string, int, error) {
 	short := newShort()
@@ -291,16 +290,18 @@ func (r *Rendezvous) Offer(acc *Account, to, longCode string) (string, int, erro
 	if err != nil {
 		return "", 0, err
 	}
-	n := r.connect(b, func(c mqtt.Client) {
-		c.Subscribe(b.topic+"/a", 1, func(_ mqtt.Client, m mqtt.Message) {
-			if text, from, ok := acc.rdvOpen(short, b.topic, m.Payload()); ok && from == to {
-				b.deliver(text)
-			}
-		})
-		c.Publish(b.topic+"/o", 1, true, payload)
+	b.subs, b.offer = []string{b.topic + "/a"}, payload
+	n := r.connect(b, func(topic string, data []byte) {
+		if topic != b.topic+"/a" {
+			return
+		}
+		if text, from, ok := acc.rdvOpen(short, b.topic, data); ok && from == to {
+			b.deliver(text)
+		}
 	})
 	if n == 0 {
-		return "", 0, errors.New("публичные серверы для коротких кодов недоступны - отправьте другу длинный код")
+		b.close(false)
+		return "", 0, errors.New(unreachable + " - отправьте другу длинный код")
 	}
 	r.put(b)
 	return short, n, nil
@@ -313,21 +314,24 @@ func (r *Rendezvous) Fetch(acc *Account, short string) (string, string, error) {
 		return "", "", errors.New("код - 6 букв и цифр")
 	}
 	b := &rdvBox{short: short, topic: rdvTopic(short), got: make(chan string, 1), created: time.Now()}
+	b.subs = []string{b.topic + "/o"}
 	var fromMu sync.Mutex
-	n := r.connect(b, func(c mqtt.Client) {
-		c.Subscribe(b.topic+"/o", 1, func(_ mqtt.Client, m mqtt.Message) {
-			if text, from, ok := acc.rdvOpen(short, b.topic, m.Payload()); ok {
-				fromMu.Lock()
-				if b.friend == "" {
-					b.friend = from
-				}
-				fromMu.Unlock()
-				b.deliver(text)
+	n := r.connect(b, func(topic string, data []byte) {
+		if topic != b.topic+"/o" {
+			return
+		}
+		if text, from, ok := acc.rdvOpen(short, b.topic, data); ok {
+			fromMu.Lock()
+			if b.friend == "" {
+				b.friend = from
 			}
-		})
+			fromMu.Unlock()
+			b.deliver(text)
+		}
 	})
 	if n == 0 {
-		return "", "", errors.New("публичные серверы для коротких кодов недоступны - попросите у друга длинный код")
+		b.close(false)
+		return "", "", errors.New(unreachable + " - попросите у друга длинный код")
 	}
 	select {
 	case code := <-b.got:
@@ -352,9 +356,12 @@ func (r *Rendezvous) Answer(acc *Account, short, longCode string) error {
 	if err != nil {
 		return err
 	}
+	b.mu.Lock()
+	ts := append([]transport(nil), b.ts...)
+	b.mu.Unlock()
 	sent := 0
-	for _, c := range b.list() {
-		if t := c.Publish(b.topic+"/a", 1, true, payload); t.WaitTimeout(5*time.Second) && t.Error() == nil {
+	for _, t := range ts {
+		if t.Ready() && t.Publish(b.topic+"/a", payload, true) == nil {
 			sent++
 		}
 	}
@@ -378,7 +385,7 @@ func (r *Rendezvous) Wait(short string, timeout time.Duration) (string, bool) {
 	}
 }
 
-// Close закрывает ящик и стирает его содержимое на брокерах.
+// Close закрывает ящик и стирает его содержимое на серверах.
 func (r *Rendezvous) Close(short string) {
 	short = normShort(short)
 	r.mu.Lock()
