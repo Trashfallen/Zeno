@@ -27,6 +27,19 @@ type File struct {
 	Master  string   `json:"master"`  // публичный ключ администратора, base64
 	Users   []Entry  `json:"users"`   //
 	Revoked []string `json:"revoked"` // отозванные логины: их сертификаты больше не принимаются
+	// Bound - сертификаты v2: логин привязан к ключу (ID) участника. Сертификат v1
+	// подписывает только логин и лежит в каждом коде дружбы, с ним можно выдать
+	// себя за участника со своим ключом. v2 так не подделать.
+	Bound []Binding `json:"bound,omitempty"`
+	// RequireBound: новых друзей принимать только с сертификатом v2.
+	// Включать, когда привязаны все участники.
+	RequireBound bool `json:"require_bound,omitempty"`
+}
+
+type Binding struct {
+	Login string `json:"login"`
+	ID    string `json:"id"`   // публичный ключ участника, base64url как в коде дружбы
+	Cert  string `json:"cert"` // подпись администратора "zeno-beta-v2|логин|ID"
 }
 
 type Entry struct {
@@ -46,6 +59,8 @@ var (
 func NormLogin(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 func message(login string) []byte { return []byte("zeno-beta-v1|" + NormLogin(login)) }
+
+func messageV2(login, id string) []byte { return []byte("zeno-beta-v2|" + NormLogin(login) + "|" + id) }
 
 func kek(password string, salt []byte) []byte {
 	return argon2.IDKey([]byte(password), salt, 3, 64*1024, 4, 32)
@@ -105,6 +120,36 @@ func (f *File) Verify(login string, cert []byte) bool {
 		return false
 	}
 	return ed25519.Verify(k, message(login), cert)
+}
+
+// VerifyBound: сертификат v2 выдан именно этому логину с этим ключом и логин не отозван.
+func (f *File) VerifyBound(login, id string, cert []byte) bool {
+	k := f.masterKey()
+	if k == nil || len(cert) != ed25519.SignatureSize || slices.Contains(f.Revoked, NormLogin(login)) {
+		return false
+	}
+	return ed25519.Verify(k, messageV2(login, id), cert)
+}
+
+// BoundCert - сертификат v2 для своего логина и ключа или nil, если администратор
+// еще не привязал этот ключ.
+func (f *File) BoundCert(login, id string) []byte {
+	login = NormLogin(login)
+	for _, b := range f.Bound {
+		if b.Login != login || b.ID != id {
+			continue
+		}
+		if cert, err := b64.DecodeString(b.Cert); err == nil && f.VerifyBound(login, id, cert) {
+			return cert
+		}
+	}
+	return nil
+}
+
+// Bind выпускает сертификат v2 (для утилиты администратора).
+func Bind(master ed25519.PrivateKey, login, id string) Binding {
+	login = NormLogin(login)
+	return Binding{Login: login, ID: id, Cert: b64.EncodeToString(ed25519.Sign(master, messageV2(login, id)))}
 }
 
 // Seal выпускает запись участника (для утилиты администратора).

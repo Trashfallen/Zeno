@@ -3,7 +3,13 @@
 //	go run ./tools/beta add <логин>...   новый участник, печатает пароль
 //	go run ./tools/beta passwd <логин>   новый пароль (старый перестает работать в новых сборках)
 //	go run ./tools/beta remove <логин>   отозвать доступ
+//	go run ./tools/beta bind <код дружбы>...   привязать логин к ключу участника (сертификат v2)
+//	go run ./tools/beta strict on|off    принимать новых друзей только с сертификатом v2
 //	go run ./tools/beta list
+//
+// Сертификат v1 подписывает только логин, с ним можно выдать себя за участника.
+// Порядок перехода: участники обновляются, присылают свои коды дружбы, по каждому
+// bind, выпуск версии; когда привязаны все - strict on и еще один выпуск.
 //
 // Меняет beta_users.json в корне проекта (он вшивается в программу при сборке).
 // Закрытый ключ администратора лежит вне репозитория: %APPDATA%\Zeno-admin\master.key
@@ -21,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"zeno/internal/beta"
 )
@@ -37,7 +44,7 @@ func keyPath() string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("команды: add <логин>..., passwd <логин>, remove <логин>, list")
+		fmt.Println("команды: add <логин>..., passwd <логин>, remove <логин>, bind <код дружбы>..., strict on|off, list")
 		os.Exit(2)
 	}
 	f, err := load()
@@ -47,12 +54,52 @@ func main() {
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "list":
 		for _, u := range f.Users {
-			fmt.Println(u.Login)
+			n := 0
+			for _, b := range f.Bound {
+				if b.Login == u.Login {
+					n++
+				}
+			}
+			fmt.Printf("%-16s ключей привязано: %d\n", u.Login, n)
 		}
 		for _, r := range f.Revoked {
 			fmt.Println(r, "(отозван)")
 		}
+		fmt.Println("строгая проверка (strict):", f.RequireBound)
 		return
+	case "bind":
+		master, err := masterKey(f)
+		if err != nil {
+			fail(err)
+		}
+		if len(args) == 0 {
+			fail(errors.New("укажите код дружбы участника"))
+		}
+		for _, code := range args {
+			login, id, err := parseFriendCode(code)
+			if err != nil {
+				fail(err)
+			}
+			if !slices.ContainsFunc(f.Users, func(e beta.Entry) bool { return e.Login == login }) || slices.Contains(f.Revoked, login) {
+				fail(fmt.Errorf("%s нет среди участников беты", login))
+			}
+			b := beta.Bind(master, login, id)
+			f.Bound = slices.DeleteFunc(f.Bound, func(x beta.Binding) bool { return x.Login == login && x.ID == id })
+			f.Bound = append(f.Bound, b)
+			fmt.Printf("%-16s привязан ключ %s\n", login, id)
+		}
+	case "strict":
+		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+			fail(errors.New("strict on или strict off"))
+		}
+		f.RequireBound = args[0] == "on"
+		if f.RequireBound {
+			for _, u := range f.Users {
+				if !slices.ContainsFunc(f.Bound, func(b beta.Binding) bool { return b.Login == u.Login }) {
+					fmt.Println("внимание: у", u.Login, "нет привязанного ключа - новых друзей он добавить не сможет")
+				}
+			}
+		}
 	case "add", "passwd":
 		master, err := masterKey(f)
 		if err != nil {
@@ -99,6 +146,28 @@ func main() {
 		fail(err)
 	}
 	fmt.Println("beta_users.json обновлен - соберите и выпустите новую версию")
+}
+
+// parseFriendCode достает логин и ключ из кода дружбы (формат как в profile.go).
+func parseFriendCode(code string) (login, id string, err error) {
+	const prefix = "ZENO-FRIEND:"
+	code = strings.Join(strings.Fields(code), "")
+	if !strings.HasPrefix(code, prefix) {
+		return "", "", errors.New("это не код дружбы Zeno: " + code)
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(code, prefix))
+	var card struct {
+		ID    string `json:"id"`
+		Login string `json:"l"`
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &card)
+	}
+	pub, _ := base64.RawURLEncoding.DecodeString(card.ID)
+	if err != nil || len(pub) != ed25519.PublicKeySize || card.Login == "" {
+		return "", "", errors.New("код дружбы поврежден")
+	}
+	return beta.NormLogin(card.Login), card.ID, nil
 }
 
 func load() (*beta.File, error) {

@@ -222,11 +222,13 @@ func (n *ntfyT) loop() {
 		} else {
 			err = n.stream(ctx, strings.Join(list, ","), since)
 		}
+		// отменили снаружи (сменились темы) - до нашего cancel(), иначе ctx.Err() всегда не nil
+		resubscribe := ctx.Err() != nil
 		cancel()
 		if n.closed.Load() {
 			return
 		}
-		if err != nil && ctx.Err() == nil {
+		if err != nil && !resubscribe {
 			n.ready.Store(false)
 			logf("ntfy %s: %v", n.base, err)
 			select {

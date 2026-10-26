@@ -237,12 +237,16 @@ type friendCard struct {
 	Nick  string `json:"n"`
 	Color string `json:"c"`
 	Cert  string `json:"cert"`
+	Cert2 string `json:"cert2,omitempty"` // логин привязан к ID (см. beta.Binding)
 }
 
 func (a *Account) FriendCode() string {
 	a.mu.Lock()
 	card := friendCard{V: 1, ID: a.ID(), Login: a.f.Login, Nick: a.f.Nick, Color: a.f.Color, Cert: a.f.Cert}
 	a.mu.Unlock()
+	if c := betaUsers.BoundCert(card.Login, card.ID); c != nil {
+		card.Cert2 = b64.EncodeToString(c)
+	}
 	b, _ := json.Marshal(card)
 	return friendPrefix + b64.EncodeToString(b)
 }
@@ -263,14 +267,25 @@ func (a *Account) AddFriend(code string) (Friend, error) {
 	}
 	pub, err := b64.DecodeString(card.ID)
 	cert, _ := b64.DecodeString(card.Cert)
+	cert2, _ := b64.DecodeString(card.Cert2)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return Friend{}, errors.New("код дружбы поврежден")
 	}
-	if !betaUsers.Verify(card.Login, cert) {
-		return Friend{}, errors.New("код не от участника беты или его доступ отозван")
-	}
 	if card.ID == a.ID() {
 		return Friend{}, errors.New("это ваш собственный код")
+	}
+	if !betaUsers.VerifyBound(card.Login, card.ID, cert2) {
+		if !betaUsers.Verify(card.Login, cert) {
+			return Friend{}, errors.New("код не от участника беты или его доступ отозван")
+		}
+		// сертификат v1 не привязан к ключу: после включения строгой проверки
+		// принимаем его только от уже добавленного друга с тем же ключом
+		a.mu.Lock()
+		known := slices.ContainsFunc(a.f.Friends, func(f Friend) bool { return f.ID == card.ID })
+		a.mu.Unlock()
+		if betaUsers.RequireBound && !known {
+			return Friend{}, errors.New("у друга старая версия Zeno или его ключ еще не подтвержден администратором беты")
+		}
 	}
 	nick, err := cleanNick(card.Nick)
 	if err != nil {

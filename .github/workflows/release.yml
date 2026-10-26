@@ -42,10 +42,18 @@ jobs:
           Copy-Item docs/README-testers.txt release/README.txt
           Compress-Archive -Path release/* -DestinationPath dist/Zeno-${{ github.ref_name }}-win64.zip
 
+      - name: Подпись
+        # без секрета RELEASE_SIGNING_KEY шаг падает: релиз без подписи
+        # установленные копии программы не поставят
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: go run ./tools/signrelease dist/Zeno.exe
+
       - name: Релиз
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/Zeno.exe
+            dist/Zeno.exe.sig
             dist/Zeno-${{ github.ref_name }}-win64.zip
           generate_release_notes: true

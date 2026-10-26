@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ func TestNewerVersion(t *testing.T) {
 }
 
 // testBeta подменяет список беты на временный с двумя участниками.
-func testBeta(t *testing.T) {
+func testBeta(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, master, _ := ed25519.GenerateKey(rand.Reader)
 	f := &beta.File{Master: base64.RawStdEncoding.EncodeToString(master.Public().(ed25519.PublicKey))}
@@ -48,6 +49,46 @@ func testBeta(t *testing.T) {
 	old := betaUsers
 	betaUsers = f
 	t.Cleanup(func() { betaUsers = old })
+	return master
+}
+
+func TestBetaBoundCert(t *testing.T) {
+	master := testBeta(t)
+	ann, bob, carl := testAccount(t, "ann"), testAccount(t, "bob"), testAccount(t, "bob")
+	// "mallory": логин и сертификат v1 из чужого кода дружбы, свой ключ
+	mallory := testAccount(t, "ann")
+	// пока строгая проверка выключена, все как раньше
+	if _, err := bob.AddFriend(mallory.FriendCode()); err != nil {
+		t.Fatalf("v1 без строгой проверки: %v", err)
+	}
+	betaUsers.Bound = []beta.Binding{beta.Bind(master, "ann", ann.ID()), beta.Bind(master, "bob", bob.ID())}
+	betaUsers.RequireBound = true
+	if betaUsers.BoundCert("ann", ann.ID()) == nil || betaUsers.BoundCert("ann", mallory.ID()) != nil {
+		t.Fatal("нет сертификата v2 для привязанного ключа")
+	}
+	if _, err := bob.AddFriend(ann.FriendCode()); err != nil {
+		t.Fatalf("привязанный ключ не принят: %v", err)
+	}
+	if _, err := carl.AddFriend(mallory.FriendCode()); err == nil {
+		t.Fatal("чужой ключ под логином ann принят при строгой проверке")
+	}
+	// уже добавленный друг со старым кодом не ломается
+	if _, err := bob.AddFriend(mallory.FriendCode()); err != nil {
+		t.Fatalf("известный друг с v1: %v", err)
+	}
+	// сертификат v2 не переносится на другой ключ
+	var card friendCard
+	b, _ := b64.DecodeString(strings.TrimPrefix(ann.FriendCode(), friendPrefix))
+	json.Unmarshal(b, &card)
+	card.ID = mallory.ID()
+	b, _ = json.Marshal(card)
+	if _, err := carl.AddFriend(friendPrefix + b64.EncodeToString(b)); err == nil {
+		t.Fatal("сертификат v2 принят с подмененным ключом")
+	}
+	betaUsers.Revoked = []string{"ann"}
+	if _, err := carl.AddFriend(ann.FriendCode()); err == nil {
+		t.Fatal("отозванный логин принят по v2")
+	}
 }
 
 func testAccount(t *testing.T, login string) *Account {
