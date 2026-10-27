@@ -441,6 +441,9 @@ body.theater .stage { height: 100vh; }
 .row-set .rs-title { color: var(--head); font-weight: 500; }
 .row-set .rs-sub { color: var(--muted); font-size: 14px; margin-top: 2px; }
 select.input { height: 40px; cursor: pointer; }
+.row-set > select.input { width: auto; flex: none; max-width: 50%; }
+.row-set > .range-row { flex: 0 0 240px; }
+.range-row output { white-space: nowrap; }
 
 .switch { position: relative; width: 40px; height: 24px; flex: none; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }

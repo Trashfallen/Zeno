@@ -12,6 +12,13 @@ const MEDIA_DEFAULTS = {
   stageHeight: 0, // высота окна звонка, 0 - по умолчанию
   vol: {}, // громкость друзей: { id: { voice, stream, voiceMuted, streamMuted } }, 0-300%
 };
+// шумодавы на выбор: значение, название, пояснение
+const NS_MODES = [
+  ["rnnoise", "RNNoise (рекомендуется)", "Нейросеть RNNoise убирает вентиляторы, улицу, клавиатуру и чавканье - как Krisp в Discord. Почти не грузит процессор."],
+  ["dfn", "DeepFilterNet3 - чище, тяжелее", "Нейросеть DeepFilterNet3: чище RNNoise, меньше «подводного» звука в голосе. Сильнее грузит процессор, задержка голоса больше на ~40 мс."],
+  ["standard", "Стандартное (Chromium)", "Встроенный шумодав браузера: слабее нейросетей, зато работает с изоляцией голоса."],
+  ["off", "Выключено", "Без шумодава. Так же выбирают внешний: NVIDIA Broadcast, Krisp и т.п. - выберите их микрофон выше."],
+];
 const COLORS = ["#5865f2", "#3ba55c", "#faa61a", "#ed4245", "#eb459e", "#9b59b6", "#1abc9c", "#e67e22"];
 const SPEAK_DB = -50;
 
@@ -2182,6 +2189,17 @@ function secVoice() {
   const iso = supportsVoiceIsolation();
   const isoRow = switchRow("Изоляция голоса", iso ? "Для стандартного шумоподавления: сильнее отделяет голос от фона." : "Недоступно в этой версии WebView2.",
     S.media.isolation && iso, (v) => setMedia({ isolation: v }), !iso || S.media.nsMode !== "standard");
+  const nsSub = h("div", { class: "rs-sub" });
+  const dfnRow = h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Сила DeepFilterNet"),
+    h("div", { class: "rs-sub" }, "Насколько глушить шум. Меньше - фон слышен чуть-чуть, зато голос естественнее.")),
+    rangeRow(10, 100, S.media.dfnLevel, (v) => v + " дБ", (v) => setMedia({ dfnLevel: v })));
+  const syncNS = () => {
+    const m = S.media.nsMode;
+    const err = m === "dfn" && (mic.dfnError || (testMic && testMic.dfnError));
+    nsSub.textContent = err ? "DeepFilterNet не запустился, вместо него работает RNNoise: " + err : NS_MODES.find(([v]) => v === m)?.[2] || "";
+    dfnRow.style.display = m === "dfn" ? "" : "none";
+  };
+  syncNS();
   const camBox = h("div", { class: "cam-preview" }, "Камера выключена");
   const camBtn = h("button", { class: "btn small", onclick: async () => {
     if (camTest) {
@@ -2218,12 +2236,13 @@ function secVoice() {
     pttRow,
     sensBox,
     h("h3", {}, "Обработка голоса"),
-    h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Шумоподавление"),
-      h("div", { class: "rs-sub" }, "Нейросеть RNNoise убирает вентиляторы, улицу, клавиатуру и чавканье - как Krisp в Discord.")),
-      selectEl([["rnnoise", "Нейросеть (рекомендуется)"], ["standard", "Стандартное"], ["off", "Выключено"]], S.media.nsMode, (v) => {
+    h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Шумоподавление"), nsSub),
+      selectEl(NS_MODES.map(([v, l]) => [v, l]), S.media.nsMode, (v) => {
         setMedia({ nsMode: v });
         isoRow.querySelector("input").disabled = !iso || v !== "standard";
+        syncNS();
       })),
+    dfnRow,
     switchRow("Передавать только голос", "Пока вы не говорите, звуки не уходят вовсе: жевание, клавиатура, щелчки мыши, дыхание.", S.media.vad, (v) => setMedia({ vad: v })),
     isoRow,
     switchRow("Эхоподавление", "Друг не слышит себя из ваших колонок. Не выключайте без наушников.", S.media.ec, (v) => setMedia({ ec: v })),

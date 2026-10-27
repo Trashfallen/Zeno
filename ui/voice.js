@@ -2,19 +2,44 @@
 //
 // Цепочка микрофона: захват с обработкой Chromium (эхоподавление,
 // автоусиление, стандартный шумодав и изоляция голоса - что включено)
-// -> громкость ввода -> RNNoise и отсечка «не голоса» (voice-worklet.js)
+// -> громкость ввода -> [DeepFilterNet3 (df-worklet.js), в режиме dfn]
+// -> RNNoise и отсечка «не голоса» (voice-worklet.js)
 // -> выключатель (микрофон выкл / push-to-talk) -> дорожка, которая уходит другу.
+//
+// В режиме dfn шум убирает DeepFilterNet, а RNNoise только оценивает, голос ли это.
 
 export const VOICE_DEFAULTS = {
   input: "default", output: "default", camera: "default",
   inputVolume: 100, outputVolume: 100,
-  nsMode: "rnnoise", // rnnoise (нейросеть, как Krisp) | standard (Chromium) | off
+  nsMode: "rnnoise", // rnnoise (нейросеть, как Krisp) | dfn (DeepFilterNet3, чище и тяжелее) | standard (Chromium) | off
+  dfnLevel: 100, // DeepFilterNet: на сколько дБ максимум глушить шум
   vad: true, // передавать только голос
   isolation: true, ec: true, agc: true,
   gate: true, gateAuto: true, threshold: -50,
   mode: "vad", pttKey: 0, pttLabel: "",
   voiceKbps: 64,
 };
+
+// wasm и модель DeepFilterNet грузятся один раз за запуск программы
+let dfnAssets = null;
+
+function loadDFN() {
+  if (!dfnAssets) {
+    const get = async (url) => {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(url + ": " + r.status);
+      return r;
+    };
+    dfnAssets = Promise.all([
+      // wasm лежит сжатым (16 МБ -> 4 МБ в exe)
+      get("df/df_bg.wasm.gz").then((r) => new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer())
+        .then((b) => WebAssembly.compile(b)),
+      get("df/DeepFilterNet3_onnx.tar.gz").then((r) => r.arrayBuffer()),
+    ]).then(([wasmModule, modelBytes]) => ({ wasmModule, modelBytes }));
+    dfnAssets.catch(() => { dfnAssets = null; });
+  }
+  return dfnAssets;
+}
 
 export function supportsVoiceIsolation() {
   try { return !!navigator.mediaDevices.getSupportedConstraints().voiceIsolation; } catch (e) { return false; }
@@ -67,7 +92,11 @@ export class Mic extends EventTarget {
     this.out = this.ctx.createGain();
     this.dest = this.ctx.createMediaStreamDestination();
     this.dest.channelCount = 1;
-    src.connect(this.gain).connect(this.gate).connect(this.out).connect(this.dest);
+    this.dfn = null;
+    this.dfnError = "";
+    if (cfg.nsMode === "dfn") await this._startDFN(cfg);
+    src.connect(this.gain);
+    (this.dfn ? this.gain.connect(this.dfn) : this.gain).connect(this.gate).connect(this.out).connect(this.dest);
     this.gate.port.onmessage = (e) => {
       if (e.data.error) {
         console.warn("RNNoise не загрузился:", e.data.error);
@@ -87,16 +116,42 @@ export class Mic extends EventTarget {
     return this.track;
   }
 
+  // _startDFN ставит DeepFilterNet; не вышло - шум убирает RNNoise (см. apply)
+  async _startDFN(cfg) {
+    const ctx = this.ctx;
+    try {
+      const a = await loadDFN();
+      await ctx.audioWorklet.addModule("df-worklet.js");
+      this.dfn = new AudioWorkletNode(ctx, "zeno-dfn", {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+        processorOptions: { wasmModule: a.wasmModule, modelBytes: a.modelBytes, level: cfg.dfnLevel },
+      });
+      this.dfn.port.onmessage = (e) => {
+        if (!e.data.error) return;
+        console.warn("DeepFilterNet не запустился:", e.data.error);
+        this.dfnError = e.data.error;
+        if (this.cfg) this.apply(this.cfg);
+      };
+    } catch (e) {
+      console.warn("DeepFilterNet не загрузился:", e);
+      this.dfnError = String(e);
+      this.dfn = null;
+    }
+  }
+
   // apply - то, что меняется без перезахвата микрофона
   apply(cfg) {
     if (!this.ctx) return;
+    this.cfg = cfg;
     this.gain.gain.value = Math.max(0, cfg.inputVolume) / 100;
     this.ptt = cfg.mode === "ptt";
+    if (this.dfn) this.dfn.port.postMessage({ level: cfg.dfnLevel });
+    const dfnOK = !!this.dfn && !this.dfnError;
     this.gate.port.postMessage({
       enabled: cfg.gate && !this.ptt,
       mode: this.ptt ? "open" : (cfg.gateAuto ? "auto" : "manual"),
       threshold: cfg.threshold,
-      denoise: cfg.nsMode === "rnnoise",
+      denoise: cfg.nsMode === "rnnoise" || (cfg.nsMode === "dfn" && !dfnOK),
       vad: cfg.vad && !this.ptt,
     });
     this._updateOut();
@@ -114,7 +169,7 @@ export class Mic extends EventTarget {
     if (this.raw) this.raw.getTracks().forEach((t) => t.stop());
     if (this.track) this.track.stop();
     if (this.ctx) this.ctx.close().catch(() => {});
-    this.raw = this.track = this.ctx = null;
+    this.raw = this.track = this.ctx = this.dfn = null;
     this.gateOpen = false;
     this.level = -120;
   }
