@@ -1571,10 +1571,11 @@ async function tuneScreen() {
   try { await v.applyConstraints({ width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: pr.fps, max: pr.fps } }); } catch (e) { /* источник не умеет */ }
   const st = v.getSettings();
   const scale = Math.max(1, (st.width || pr.w) / pr.w, (st.height || pr.h) / pr.h);
-  // для игр - balanced: при нехватке канала или процессора понемногу снижаются и кадры,
-  // и разрешение; maintain-framerate в таких условиях скатывался до 320x180
+  // для игр - держим и кадры, и разрешение: при нехватке канала падает только
+  // четкость. balanced при любом упоре (разгон канала, скачок времени кодирования)
+  // резал до 25-30 к/с и снижал разрешение, maintain-framerate скатывался до 320x180
   await p.tuneSender("screen", { maxBitrate: pr.kbps * 1000, maxFramerate: pr.fps, scaleResolutionDownBy: scale },
-    motion ? "balanced" : "maintain-resolution");
+    motion ? "maintain-framerate-and-resolution" : "maintain-resolution");
   if (S.screen.getAudioTracks().length && S.media.screenAudio) await p.tuneSender("sys", { maxBitrate: 128000 });
 }
 

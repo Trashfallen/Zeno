@@ -299,7 +299,14 @@ export class Peer extends EventTarget {
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
     Object.assign(p.encodings[0], enc);
     if (degradation) p.degradationPreference = degradation;
-    try { await t.sender.setParameters(p); } catch (e) { console.warn("setParameters", slot, e); }
+    try {
+      await t.sender.setParameters(p);
+    } catch (e) {
+      // maintain-framerate-and-resolution знают не все версии движка - тогда balanced
+      if (degradation !== "maintain-framerate-and-resolution") return console.warn("setParameters", slot, e);
+      p.degradationPreference = "balanced";
+      try { await t.sender.setParameters(p); } catch (e2) { console.warn("setParameters", slot, e2); }
+    }
   }
 
   // ---------- статистика ----------
