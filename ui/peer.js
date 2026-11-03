@@ -32,7 +32,7 @@ export const SCREEN_PRESETS = {
   "source60": { w: 7680, h: 4320, fps: 60, kbps: 20000, label: "Исходное, 60 к/с" },
 };
 
-function gathered(pc, timeout = 4000) {
+export function gathered(pc, timeout = 4000) {
   return new Promise((resolve) => {
     if (pc.iceGatheringState === "complete") return resolve();
     const done = () => {

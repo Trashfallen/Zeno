@@ -208,6 +208,19 @@ func (s *Server) route(path string, body M) (any, error) {
 	case "screen/picked":
 		app.ScreenPicked()
 		return nil, nil
+	case "nscreen/start":
+		return app.NativeStart(body)
+	case "nscreen/answer":
+		return nil, app.NativeAnswer(str(body, "sdp"))
+	case "nscreen/quality":
+		kbps, _ := body["kbps"].(float64)
+		app.NativeQuality(int(kbps))
+		return nil, nil
+	case "nscreen/stats":
+		return app.NativeStats(), nil
+	case "nscreen/stop":
+		app.NativeStop()
+		return nil, nil
 	case "net/stun":
 		return app.stun.Info(), nil
 	case "ring":

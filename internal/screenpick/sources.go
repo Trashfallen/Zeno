@@ -144,6 +144,15 @@ func List(thumbs bool) []Source {
 	return out
 }
 
+// Target - что захватывать своим способом: окно (hwnd) или монитор, на
+// котором лежит точка (x, y).
+func (s Source) Target() (hwnd uintptr, x, y int32) {
+	if s.Kind == "window" {
+		return s.hwnd, 0, 0
+	}
+	return 0, s.rc.Left + s.rc.w()/2, s.rc.Top + s.rc.h()/2
+}
+
 // Find возвращает источник из последнего списка.
 func Find(id string) (Source, bool) {
 	lastMu.Lock()

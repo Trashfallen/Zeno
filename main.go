@@ -140,6 +140,7 @@ func (a *App) Quit() {
 	a.quitOnce.Do(func() {
 		logf("Выход")
 		close(a.quitCh)
+		a.NativeStop()
 		a.window.Close()
 		if a.trayReady.Load() {
 			systray.Quit()

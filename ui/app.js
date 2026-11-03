@@ -2,11 +2,11 @@
 
 import { api, $, $$, h, esc, copyText, readClipboard, icon, avatar, hhmm, dayLabel, duration } from "./api.js";
 import { Mic, LevelWatcher, Playback, Sfx, VOICE_DEFAULTS, supportsVoiceIsolation } from "./voice.js";
-import { Peer, SLOTS, DEFAULT_STUN, SCREEN_PRESETS, isOldDefaultStun } from "./peer.js";
+import { Peer, SLOTS, DEFAULT_STUN, SCREEN_PRESETS, isOldDefaultStun, gathered } from "./peer.js";
 
 const MEDIA_DEFAULTS = {
   ...VOICE_DEFAULTS,
-  screenPreset: "1080p60", screenMode: "motion", screenAudio: true, codec: "h264", camRes: "720p",
+  screenPreset: "1080p60", screenMode: "motion", screenAudio: true, captureMode: "native", codec: "h264", camRes: "720p",
   stun: "", turnUrl: "", turnUser: "", turnPass: "", // stun пусто - выбор программы (stun.go)
   sounds: true, notifyMessages: true,
   stageHeight: 0, // высота окна звонка, 0 - по умолчанию
@@ -695,7 +695,18 @@ async function onPeerMessage(id, m) {
     case "hangup":
       if (S.call && S.call.id === id) endCall();
       break;
+    case "nscreen-offer":
+      if (S.call && S.call.id === id && typeof m.sdp === "string") await acceptNative(id, m.sdp);
+      break;
+    case "nscreen-answer":
+      if (S.nsWait && typeof m.sdp === "string") S.nsWait(m.sdp);
+      break;
+    case "nscreen-stop":
+      closeNativeIn();
+      renderStage();
+      break;
     case "state":
+      if (!m.screen) closeNativeIn();
       S.remote.set(id, { mic: !!m.mic, deaf: !!m.deaf, cam: !!m.cam, screen: !!m.screen });
       if (m.screen && S.call && S.call.id === id && !S.screen) S.focus = null;
       renderStage();
@@ -1231,6 +1242,7 @@ function endCall(reason) {
   const p = peerOf(c.id);
   stopScreen(true);
   stopCam(true);
+  closeNativeIn();
   mic.stop();
   if (p && p.mediaReady) for (const slot of SLOTS) p.setTrack(slot, null).catch(() => {});
   detachRemote();
@@ -1423,7 +1435,11 @@ function openScreenPicker() {
       chipGroup([["30", "30 к/с"], ["60", "60 к/с"]], presetParts().fps, (v) => setPreset({ fps: v }))),
     h("div", { class: "sp-set" }, h("div", { class: "sp-label" }, "Режим"),
       chipGroup([["motion", "Плавность"], ["detail", "Четкость"]], S.media.screenMode, (v) => setMedia({ screenMode: v }, tuneScreen))),
-    h("label", { class: "sp-set sp-audio" },
+    h("div", { class: "sp-set" }, h("div", { class: "sp-label" }, "Способ захвата"),
+      chipGroup([["native", "Видеокарта"], ["browser", "Браузер"]], S.media.captureMode === "browser" ? "browser" : "native",
+        (v) => setMedia({ captureMode: v })),
+      h("div", { class: "sp-hint" }, "Видеокарта: свой захват и аппаратный кодер, держит 60 к/с под игрой. Браузер - как раньше")),
+    h("label", { class: "sp-set sp-audio sp-wide" },
       h("div", {}, h("div", { class: "sp-label" }, "Звук системы"), h("div", { class: "sp-hint" }, "Можно включить и выключить во время трансляции")),
       h("span", { class: "switch" }, audio, h("i"))));
 
@@ -1520,17 +1536,21 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 async function beginScreen(id) {
   if (!S.call || S.call.state !== "active") return;
   const pr = SCREEN_PRESETS[S.media.screenPreset] || SCREEN_PRESETS["1080p60"];
+  // свой захват: картинку другу шлет программа, а поток браузера нужен только
+  // для звука системы и маленького превью у себя - ему хватит 10 к/с
+  let wantNative = !!id && S.media.captureMode !== "browser";
   if (id) {
     // свое окно уже закрыто - ждем пару кадров, чтобы на снимке его не было
     await nextFrame();
     await nextFrame();
-    try { await api("screen/pick", { id }); } catch (e) { toast(e.message, "err"); id = null; }
+    try { await api("screen/pick", { id }); } catch (e) { toast(e.message, "err"); id = null; wantNative = false; }
   }
   let stream;
   try {
     // звук берем всегда: отправлять его или нет, решает галочка, без перезапуска трансляции
+    const fps = wantNative ? PREVIEW_FPS : pr.fps;
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: pr.fps, max: pr.fps } },
+      video: { width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: fps, max: fps } },
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false, restrictOwnAudio: true },
       systemAudio: "include",
       selfBrowserSurface: "exclude",
@@ -1552,13 +1572,132 @@ async function beginScreen(id) {
   const v = stream.getVideoTracks()[0];
   v.onended = () => stopScreen();
   const p = peerOf(S.call.id);
-  await p.setTrack("screen", v);
+  S.native = false;
+  if (wantNative) {
+    S.native = await startNative(id).catch((e) => {
+      toast("Захват через видеокарту не запустился, транслирую через браузер: " + e.message, "err");
+      return false;
+    });
+    if (!S.screen) return; // трансляцию остановили, пока договаривались
+  }
+  if (!S.native) await p.setTrack("screen", v);
   await applyScreenAudio();
   await tuneScreen();
   api("capturebar", { active: true }).catch(() => {});
   sfx.play("stream");
   sendState();
   renderAll();
+}
+
+// ---------- свой захват через видеокарту ----------
+// Картинку захватывает и сжимает программа (аппаратный кодер), а шлет другу
+// отдельным соединением прямо в его браузер. Договариваемся по каналу данных:
+// nscreen-offer -> nscreen-answer. Друг на старой версии не ответит - тогда
+// через 6 с трансляция идет как раньше, через браузер.
+
+const PREVIEW_FPS = 10;
+S.native = false;
+S.nsWait = null; // ждем ответ друга
+S.nsIn = null; // прием своего захвата друга: { pc, track }
+S.nsStats = null;
+
+async function startNative(id) {
+  const pr = SCREEN_PRESETS[S.media.screenPreset] || SCREEN_PRESETS["1080p60"];
+  const r = await api("nscreen/start", { id, w: pr.w, h: pr.h, fps: pr.fps, kbps: pr.kbps, ice: iceServers() });
+  const p = S.call && peerOf(S.call.id);
+  if (!p) {
+    api("nscreen/stop").catch(() => {});
+    return false;
+  }
+  const answer = await new Promise((resolve) => {
+    S.nsWait = resolve;
+    p.send({ k: "nscreen-offer", sdp: r.sdp });
+    setTimeout(() => resolve(null), 6000);
+  });
+  S.nsWait = null;
+  if (!answer || !S.screen) {
+    api("nscreen/stop").catch(() => {});
+    if (!answer) toast("У друга старая версия Zeno - транслирую через браузер", "err");
+    return false;
+  }
+  await api("nscreen/answer", { sdp: answer });
+  // соединение напрямую к другу может не пробиться - тогда как раньше, через браузер
+  for (let i = 0; i < 40; i++) {
+    await sleep(200);
+    const r = await api("nscreen/stats").catch(() => null);
+    const state = r && r.stats && r.stats.state;
+    if (state === "connected") return true;
+    if (!S.screen || state === "failed" || state === "closed") break;
+  }
+  api("nscreen/stop").catch(() => {});
+  p.send({ k: "nscreen-stop" });
+  if (S.screen) toast("Прямое соединение для захвата через видеокарту не установилось - транслирую через браузер", "err");
+  return false;
+}
+
+function stopNative() {
+  if (!S.native) return;
+  S.native = false;
+  S.nsStats = null;
+  api("nscreen/stop").catch(() => {});
+  const p = S.call && peerOf(S.call.id);
+  if (p) p.send({ k: "nscreen-stop" });
+}
+
+async function acceptNative(id, sdp) {
+  closeNativeIn();
+  const pc = new RTCPeerConnection({ iceServers: iceServers() });
+  const box = { pc, track: null };
+  S.nsIn = box;
+  pc.ontrack = (e) => {
+    box.track = e.track;
+    try { e.receiver.jitterBufferTarget = 0; } catch (x) { /* старый движок */ }
+    renderStage();
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed" && S.nsIn === box) {
+      closeNativeIn();
+      renderStage();
+    }
+  };
+  await pc.setRemoteDescription({ type: "offer", sdp });
+  await pc.setLocalDescription();
+  await gathered(pc, 3000);
+  if (S.nsIn !== box) return;
+  peerOf(id).send({ k: "nscreen-answer", sdp: pc.localDescription.sdp });
+}
+
+function closeNativeIn() {
+  if (!S.nsIn) return;
+  try { S.nsIn.pc.close(); } catch (e) { /* уже закрыт */ }
+  S.nsIn = null;
+}
+
+// remoteScreen - картинка трансляции друга: своим захватом, если он идет, иначе обычная
+function remoteScreen(p) {
+  return (S.nsIn && S.nsIn.track) || p.remoteTrack("screen");
+}
+
+// nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп
+async function nativeTick() {
+  if (!S.native) return;
+  const r = await api("nscreen/stats").catch(() => null);
+  if (!r || !S.native) return;
+  if (!r.active || r.ended) {
+    toast("Источник трансляции закрылся", "err");
+    stopScreen();
+    return;
+  }
+  const now = performance.now();
+  const prev = S.nsStats;
+  const st = r.stats;
+  const dt = prev ? (now - prev.at) / 1000 : 0;
+  S.nsStats = {
+    at: now, st,
+    fps: dt ? (st.Frames - prev.st.Frames) / dt : 0,
+    cap: dt ? (st.Captured - prev.st.Captured) / dt : 0,
+    bits: dt ? ((st.Bytes - prev.st.Bytes) * 8) / dt : 0,
+  };
 }
 
 // Удержание частоты кадров в режиме «Плавность»: если захват дает полную
@@ -1569,7 +1708,7 @@ const FPS_STEPS = [1, 1.25, 1.5, 2];
 const keeper = { step: 0, low: 0, good: 0, upWait: 20, upAt: 0, minH: 0, since: 0 };
 
 function keepFps(st) {
-  if (!S.screen || S.media.screenMode !== "motion") return;
+  if (!S.screen || S.native || S.media.screenMode !== "motion") return;
   const o = st.out.screen;
   // первые секунды кодер и канал разгоняются - кадров меньше и без нехватки ресурсов
   if (!o || o.framesPerSecond == null || Date.now() - keeper.since < 8000) return;
@@ -1610,6 +1749,12 @@ async function tuneScreen(keepStep) {
   const v = S.screen.getVideoTracks()[0];
   const motion = S.media.screenMode === "motion";
   v.contentHint = motion ? "motion" : "detail";
+  if (S.native) {
+    // картинку шлет программа: на лету меняется битрейт, разрешение и частота - со следующей трансляции
+    await api("nscreen/quality", { kbps: pr.kbps }).catch(() => {});
+    if (S.screen.getAudioTracks().length && S.media.screenAudio) await p.tuneSender("sys", { maxBitrate: 128000 });
+    return;
+  }
   try { await v.applyConstraints({ width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: pr.fps, max: pr.fps } }); } catch (e) { /* источник не умеет */ }
   const st = v.getSettings();
   const base = Math.max(1, (st.width || pr.w) / pr.w, (st.height || pr.h) / pr.h);
@@ -1625,6 +1770,7 @@ async function tuneScreen(keepStep) {
 
 function stopScreen(silent) {
   if (!S.screen) return;
+  stopNative();
   S.screen.getTracks().forEach((t) => t.stop());
   S.screen = null;
   api("capturebar", { active: false }).catch(() => {});
@@ -1779,7 +1925,7 @@ function renderStage() {
 
   const screenTile = (who) => {
     const me = who === "myscreen";
-    const track = me ? S.screen.getVideoTracks()[0] : p.remoteTrack("screen");
+    const track = me ? S.screen.getVideoTracks()[0] : remoteScreen(p);
     const tile = h("div", { class: "tile screen", "data-who": who },
       videoFor(who, track, { dbl: () => setFull(!S.full) }),
       h("span", { class: "live" }, "В ЭФИРЕ"),
@@ -2092,7 +2238,7 @@ const prevBytes = {};
 function rate(key, bytes, ts) {
   const prev = prevBytes[key];
   prevBytes[key] = { bytes, ts };
-  if (!prev || ts <= prev.ts) return null;
+  if (!prev || ts <= prev.ts || bytes < prev.bytes) return null; // счетчики сменились (другое соединение)
   return ((bytes - prev.bytes) * 8) / ((ts - prev.ts) / 1000);
 }
 
@@ -2109,7 +2255,18 @@ async function statsTick() {
   S.route = st.route;
   renderVoicePanel();
   keepFps(st);
+  await nativeTick();
   if (!S.showStats) return;
+  // прием своего захвата друга идет отдельным соединением - его счетчики оттуда
+  if (S.nsIn) {
+    const r = await S.nsIn.pc.getStats().catch(() => null);
+    if (r) {
+      r.forEach((s) => {
+        if (s.type === "inbound-rtp" && s.kind === "video") st.in.screen = { ...s, id: "ns-" + s.id };
+        if (s.type === "codec") st.codecs[s.id] = s.mimeType;
+      });
+    }
+  }
   const lines = (s, out) => {
     if (!s) return "нет данных";
     const codec = (st.codecs[s.codecId] || "").replace("video/", "");
@@ -2128,6 +2285,7 @@ async function statsTick() {
         l.push("упор: " + ({ bandwidth: "канал", cpu: "процессор" }[s.qualityLimitationReason] || s.qualityLimitationReason));
       }
     } else {
+      if (S.nsIn && S.nsIn.track) l.push("друг шлет: захват через видеокарту");
       l.push("декодер: " + (s.decoderImplementation || "?") + (s.powerEfficientDecoder ? " (аппаратный)" : ""));
       if (s.framesDropped) l.push("потеряно кадров: " + s.framesDropped);
       if (s.packetsReceived) l.push(`потери пакетов: ${((100 * (s.packetsLost || 0)) / (s.packetsReceived + (s.packetsLost || 0))).toFixed(1)}%`);
@@ -2136,8 +2294,18 @@ async function statsTick() {
     if (st.path) l.push(`я: ${st.path.local}`, `друг: ${st.path.remote}`);
     return l.join("\n");
   };
+  const nativeLines = () => {
+    const n = S.nsStats;
+    if (!n) return "свой захват: запускается…";
+    const l = [`${n.st.W}×${n.st.H}  ${Math.round(n.fps)} к/с`, `${mbps(n.bits)}  H264 (лимит ${(n.st.kbps / 1000).toFixed(1)} Мбит/с)`,
+      `захват: ${Math.round(n.cap)} к/с`, "кодер: " + (n.st.Encoder || "?") + " (видеокарта)"];
+    if (n.st.Skipped) l.push("пропущено (кодер занят): " + n.st.Skipped);
+    l.push("соединение: " + ({ connected: "есть", connecting: "устанавливается", new: "ждет друга", failed: "не удалось", disconnected: "прервано" }[n.st.state] || n.st.state));
+    l.push(`пинг: ${st.rtt ?? "?"} мс`);
+    return l.join("\n");
+  };
   const mine = $('.tile[data-who="myscreen"] .stats');
-  if (mine) mine.textContent = lines(st.out.screen, true);
+  if (mine) mine.textContent = S.native ? nativeLines() : lines(st.out.screen, true);
   const theirs = $('.tile[data-who="theirscreen"] .stats');
   if (theirs) theirs.textContent = lines(st.in.screen, false);
 }

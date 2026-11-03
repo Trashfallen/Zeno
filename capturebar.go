@@ -103,6 +103,20 @@ func boostWebview(on bool) {
 	}
 }
 
+// boostSelf: на время своего захвата тот же приоритет и самому Zeno - захват и
+// кодер работают в его процессе.
+func boostSelf(on bool) {
+	cpu, gpu := uint32(0x00000020), uintptr(2) // NORMAL
+	if on {
+		cpu, gpu = 0x00008000, 4 // ABOVE_NORMAL, D3DKMT HIGH
+	}
+	h := windows.CurrentProcess()
+	_ = windows.SetPriorityClass(h, cpu)
+	if procGPUP.Find() == nil {
+		procGPUP.Call(uintptr(h), gpu)
+	}
+}
+
 // webviewPIDs - процессы WebView2, запущенные нашей программой.
 func webviewPIDs() map[uint32]bool {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
