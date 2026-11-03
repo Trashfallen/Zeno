@@ -12,20 +12,22 @@ import (
 
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
+	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 // Sender - свой захват + соединение к другу.
 type Sender struct {
 	pc      *webrtc.PeerConnection
-	track   *webrtc.TrackLocalStaticSample
+	track   *webrtc.TrackLocalStaticRTP
+	pkt     rtp.Packetizer
 	stream  *Stream
 	maxKbps int
 
 	mu      sync.Mutex
 	kbps    int
-	lastTS  time.Duration
+	rtpBase uint32
 	state   string
 	cleanAt time.Time // когда потери последний раз были выше нормы
 	closed  bool
@@ -77,11 +79,13 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 		return nil, "", err
 	}
 	s := &Sender{pc: pc, maxKbps: o.Kbps, kbps: o.Kbps, state: "new"}
+	s.pkt = rtp.NewPacketizer(1200, 0, 0, &codecs.H264Payloader{}, rtp.NewRandomSequencer(), 90000)
+	s.rtpBase = uint32(time.Now().UnixNano())
 	fail := func(err error) (*Sender, string, error) {
 		s.Stop()
 		return nil, "", err
 	}
-	s.track, err = webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "screen", "zeno-screen")
+	s.track, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "screen", "zeno-screen")
 	if err != nil {
 		return fail(err)
 	}
@@ -120,15 +124,16 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	return s, pc.LocalDescription().SDP, nil
 }
 
+// write режет кадр на RTP-пакеты сам: метка времени каждого кадра - ровно
+// момент захвата (90 кГц). WriteSample в pion ставит метку по сумме
+// длительностей прошлых кадров, и неровности сдвигались на кадр - друг видел
+// подергивания.
 func (s *Sender) write(f Frame) {
-	s.mu.Lock()
-	dur := f.TS - s.lastTS
-	if s.lastTS == 0 || dur <= 0 || dur > time.Second {
-		dur = time.Second / 60
+	ts := s.rtpBase + uint32(f.TS*90000/time.Second)
+	for _, p := range s.pkt.Packetize(f.Data, 0) {
+		p.Timestamp = ts
+		_ = s.track.WriteRTP(p)
 	}
-	s.lastTS = f.TS
-	s.mu.Unlock()
-	_ = s.track.WriteSample(media.Sample{Data: f.Data, Duration: dur})
 }
 
 // readRTCP: запросы ключевого кадра и отчеты о потерях от браузера друга.

@@ -1651,7 +1651,6 @@ async function acceptNative(id, sdp) {
   S.nsIn = box;
   pc.ontrack = (e) => {
     box.track = e.track;
-    try { e.receiver.jitterBufferTarget = 0; } catch (x) { /* старый движок */ }
     renderStage();
   };
   pc.onconnectionstatechange = () => {
@@ -1852,9 +1851,13 @@ function openMenuAt(x, y, items) {
 
 let menuEl = null;
 
+// openMenu: меню у кнопки; повторный клик по той же кнопке закрывает его
 function openMenu(anchor, items, dir) {
+  const again = menuEl && menuEl.anchor === anchor;
   closeMenu();
+  if (again) return;
   menuEl = h("div", { class: "menu" }, items);
+  menuEl.anchor = anchor;
   document.body.append(menuEl);
   const r = anchor.getBoundingClientRect();
   const mr = menuEl.getBoundingClientRect();
@@ -1864,7 +1867,8 @@ function openMenu(anchor, items, dir) {
 }
 
 function outside(e) {
-  if (menuEl && !menuEl.contains(e.target)) closeMenu();
+  // клик по кнопке, открывшей меню, решает ее обработчик (закрыть повторным нажатием)
+  if (menuEl && !menuEl.contains(e.target) && !(menuEl.anchor && menuEl.anchor.contains(e.target))) closeMenu();
 }
 
 function closeMenu() {
@@ -2199,14 +2203,22 @@ $("#sbVolume").onclick = (e) => {
 (() => {
   const stage = $("#stage");
   let timer = null;
+  // пока курсор на кнопках или в открытом меню - ничего не прячем, даже если мышь стоит
+  const busy = () => !!menuEl || !!stage.querySelector(".stage-bar:hover, .tile-actions:hover");
+  const sleepLater = () => {
+    clearTimeout(timer);
+    if (isTheater()) timer = setTimeout(() => { if (isTheater() && !busy()) stage.classList.add("idle"); else sleepLater(); }, 4000);
+  };
   const wake = () => {
     stage.classList.remove("idle");
-    clearTimeout(timer);
-    if (isTheater()) timer = setTimeout(() => { if (isTheater() && !menuEl) stage.classList.add("idle"); }, 2500);
+    sleepLater();
   };
   stage.addEventListener("mousemove", wake);
   stage.addEventListener("mousedown", wake);
-  stage.addEventListener("mouseleave", () => { if (isTheater()) stage.classList.add("idle"); });
+  stage.addEventListener("mouseleave", (e) => {
+    // меню громкости и прочие лежат вне сцены - уход курсора в меню не считается уходом
+    if (isTheater() && !busy() && !(menuEl && menuEl.contains(e.relatedTarget))) stage.classList.add("idle");
+  });
   new MutationObserver(wake).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 })();
 

@@ -128,8 +128,8 @@ func boolArg(b bool) uintptr {
 }
 
 // grab отдает все накопившиеся кадры (текстура, размер содержимого, размер
-// текстуры пула). ok=false - новых кадров нет.
-func (c *capture) grab(onFrame func(tex com, w, h, texW, texH uint32)) (ok bool, err error) {
+// текстуры пула, время кадра). ok=false - новых кадров нет.
+func (c *capture) grab(onFrame func(tex com, w, h, texW, texH uint32, t int64)) (ok bool, err error) {
 	for {
 		var fr unsafe.Pointer
 		if err := hr(c.pool.call(7, uintptr(unsafe.Pointer(&fr)))); err != nil { // TryGetNextFrame
@@ -141,19 +141,21 @@ func (c *capture) grab(onFrame func(tex com, w, h, texW, texH uint32)) (ok bool,
 		frame := com{fr}
 		var cs sizeInt32
 		frame.call(8, uintptr(unsafe.Pointer(&cs))) // get_ContentSize
+		var t int64
+		frame.call(7, uintptr(unsafe.Pointer(&t))) // get_SystemRelativeTime: момент кадра, 100 нс
 		var surf unsafe.Pointer
 		if hr(frame.call(6, uintptr(unsafe.Pointer(&surf)))) == nil && surf != nil { // get_Surface
 			s := com{surf}
 			if acc, err := s.qi(&iidIDirect3DDxgiInterfaceAcc); err == nil {
 				var tex unsafe.Pointer
 				if hr(acc.call(3, uintptr(unsafe.Pointer(&iidID3D11Texture2D)), uintptr(unsafe.Pointer(&tex)))) == nil {
-					t := com{tex}
+					tx := com{tex}
 					w, h := uint32(min(cs.W, c.size.W)), uint32(min(cs.H, c.size.H))
 					if w > 0 && h > 0 {
-						onFrame(t, w, h, uint32(c.size.W), uint32(c.size.H))
+						onFrame(tx, w, h, uint32(c.size.W), uint32(c.size.H), t)
 						ok = true
 					}
-					t.release()
+					tx.release()
 				}
 				acc.release()
 			}

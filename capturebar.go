@@ -46,7 +46,9 @@ func (a *App) SetCaptureActive(active bool) {
 		start := time.Now()
 		for {
 			hideCaptureBars()
-			boostWebview(true)
+			// свой захват кодирует отдельный блок видеокарты (NVENC) - движку
+			// браузера приоритет не нужен, а лишний только мешает игре
+			boostWebview(nativeSender() == nil)
 			wait := time.Second
 			if time.Since(start) < 15*time.Second {
 				wait = 150 * time.Millisecond
@@ -62,10 +64,11 @@ func (a *App) SetCaptureActive(active bool) {
 	}()
 }
 
-// boostWebview: на время трансляции процессы движка (захват, кодер, отправка)
-// получают повышенный приоритет процессора и высокий приоритет видеокарты, как
-// у OBS. Иначе игра на весь экран забирает ресурсы и трансляция падает до
-// 25-30 к/с, хотя без игры тот же кодер дает 60 к/с на 1440p.
+// boostWebview: на время трансляции через браузер процессы движка (захват,
+// кодер, отправка) получают приоритет процессора и видеокарты выше обычного.
+// Иначе игра на весь экран забирает ресурсы и трансляция падает до 25-30 к/с.
+// Высокий (HIGH) приоритет видеокарты, как у OBS, отнимал очередь у игры:
+// мышь в игре становилась ватной и с задержкой.
 var (
 	boostMu  sync.Mutex
 	boosted  = map[uint32]bool{}
@@ -76,7 +79,7 @@ func boostWebview(on bool) {
 	boostMu.Lock()
 	defer boostMu.Unlock()
 	const aboveNormal, normal = 0x00008000, 0x00000020
-	const gpuNormal, gpuHigh = 2, 4 // D3DKMT_SCHEDULINGPRIORITYCLASS
+	const gpuNormal, gpuAbove = 2, 3 // D3DKMT_SCHEDULINGPRIORITYCLASS
 	set := func(pid uint32, cpu uint32, gpu uintptr) bool {
 		h, err := windows.OpenProcess(windows.PROCESS_SET_INFORMATION|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 		if err != nil {
@@ -97,23 +100,9 @@ func boostWebview(on bool) {
 		return
 	}
 	for pid := range webviewPIDs() {
-		if !boosted[pid] && set(pid, aboveNormal, gpuHigh) {
+		if !boosted[pid] && set(pid, aboveNormal, gpuAbove) {
 			boosted[pid] = true
 		}
-	}
-}
-
-// boostSelf: на время своего захвата тот же приоритет и самому Zeno - захват и
-// кодер работают в его процессе.
-func boostSelf(on bool) {
-	cpu, gpu := uint32(0x00000020), uintptr(2) // NORMAL
-	if on {
-		cpu, gpu = 0x00008000, 4 // ABOVE_NORMAL, D3DKMT HIGH
-	}
-	h := windows.CurrentProcess()
-	_ = windows.SetPriorityClass(h, cpu)
-	if procGPUP.Find() == nil {
-		procGPUP.Call(uintptr(h), gpu)
 	}
 }
 

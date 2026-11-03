@@ -148,28 +148,41 @@ func (s *Stream) run(started chan<- error) {
 	s.mu.Unlock()
 	started <- nil
 
-	// темп ровно fps: на каждом такте кодируем свежий кадр; если картинка
-	// стоит, раз в полсекунды повторяем последний, чтобы у друга не замирал поток
-	start := time.Now()
-	next := start
+	// Кадр кодируем сразу, как он пришел с захвата (не ждем «такта» - иначе
+	// часы игры и наши расходятся и кадры уходят то через 16, то через 33 мс),
+	// но не чаще fps: при 144 Гц берем самый свежий. Время кадра - момент
+	// захвата, чтобы друг показывал кадры с теми же промежутками, что в игре.
+	// Картинка стоит - раз в полсекунды повторяем последний кадр.
+	// Какой кадр брать, решает расписание по меткам захвата: у монитора 144-165 Гц
+	// кадры идут сеткой по 6-7 мс, и простое «не чаще 16,7 мс» брало каждый
+	// третий (55 к/с). По расписанию в среднем выходит ровно fps.
+	fd := int64(frameDur / 100)
+	var due int64
 	var fresh bool
+	var freshTS, firstTS, lastTS int64 // время захвата, единицы 100 нс
 	var lastEnc time.Time
-	var frameNo int64
 	for {
 		select {
 		case <-s.stop:
 			return
 		default:
 		}
-		got, err := c.grab(func(tex com, w, h, tw, th uint32) {
+		_, err := c.grab(func(tex com, w, h, tw, th uint32, t int64) {
 			if conv.put(tex, w, h, tw, th) == nil {
-				fresh = true
+				if fresh && !lastEnc.IsZero() && freshTS >= due-fd/4 {
+					s.mu.Lock()
+					s.stats.Skipped++ // кадр был нужен по расписанию, но кодер не успел его взять
+					s.mu.Unlock()
+				}
+				if firstTS == 0 {
+					firstTS = t
+				}
+				fresh, freshTS = true, t-firstTS
 				s.mu.Lock()
 				s.stats.Captured++
 				s.mu.Unlock()
 			}
 		})
-		_ = got
 		if err != nil {
 			return // источник пропал (окно закрыто) или устройство потеряно
 		}
@@ -180,37 +193,28 @@ func (s *Stream) run(started chan<- error) {
 			enc.setBitrate(uint32(k))
 		}
 		now := time.Now()
-		if !now.Before(next) {
-			if fresh || now.Sub(lastEnc) > 500*time.Millisecond {
-				if enc.ready() {
-					if s.keyReq.Swap(false) {
-						enc.forceKeyFrame()
-					}
-					if tex, err := conv.convert(); err == nil {
-						ts := int64(now.Sub(start) / 100)
-						if enc.input(tex, ts, int64(frameDur/100)) == nil {
-							fresh, lastEnc = false, now
-							frameNo++
-						}
-					}
-				} else if fresh {
-					s.mu.Lock()
-					s.stats.Skipped++
-					s.mu.Unlock()
+		repeat := !fresh && !lastEnc.IsZero() && now.Sub(lastEnc) > 500*time.Millisecond
+		onTime := fresh && (lastEnc.IsZero() || freshTS >= due-fd/4)
+		if (onTime || repeat) && enc.ready() {
+			if s.keyReq.Swap(false) {
+				enc.forceKeyFrame()
+			}
+			ts := freshTS
+			if repeat {
+				ts = lastTS + int64(now.Sub(lastEnc)/100)
+			}
+			if ts <= lastTS {
+				ts = lastTS + 1
+			}
+			if tex, err := conv.convert(); err == nil && enc.input(tex, ts, fd) == nil {
+				fresh, lastEnc, lastTS = false, now, ts
+				due += fd
+				if due <= ts { // картинка стояла или отстали - отсчет заново от этого кадра
+					due = ts + fd
 				}
 			}
-			next = next.Add(frameDur)
-			if now.Sub(next) > 3*frameDur { // сильно отстали - не догоняем пачкой
-				next = now.Add(frameDur)
-			}
 		}
-		wait := time.Until(next)
-		if wait > time.Millisecond {
-			wait = time.Millisecond
-		}
-		if wait > 0 {
-			time.Sleep(wait)
-		}
+		time.Sleep(time.Millisecond) // чаще не надо: кадры приходят раз в 6-7 мс даже на 165 Гц
 	}
 }
 

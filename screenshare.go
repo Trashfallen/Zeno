@@ -131,7 +131,6 @@ func (a *App) NativeStart(body M) (any, error) {
 	nativeMu.Lock()
 	native = snd
 	nativeMu.Unlock()
-	boostSelf(true)
 	return M{"sdp": sdp}, nil
 }
 
@@ -177,7 +176,6 @@ func (a *App) NativeStop() {
 	nativeMu.Unlock()
 	if s != nil {
 		s.Stop()
-		boostSelf(false)
 	}
 }
 
