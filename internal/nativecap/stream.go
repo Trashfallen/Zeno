@@ -220,7 +220,7 @@ func (s *Stream) run(started chan<- error) {
 	// кадры идут сеткой по 6-7 мс, и простое «не чаще 16,7 мс» брало каждый
 	// третий (55 к/с). По расписанию в среднем выходит ровно fps.
 	fd := int64(frameDur / 100)
-	var due int64
+	sch := schedule{fd: fd}
 	var fresh bool
 	var freshTS, firstTS, lastTS int64 // время захвата, единицы 100 нс
 	var lastEnc time.Time
@@ -232,7 +232,7 @@ func (s *Stream) run(started chan<- error) {
 		}
 		_, err := c.grab(func(tex com, w, h, tw, th uint32, t int64) {
 			if conv.put(tex, w, h, tw, th) == nil {
-				if fresh && !lastEnc.IsZero() && freshTS >= due-fd/4 {
+				if fresh && !lastEnc.IsZero() && sch.due(freshTS) {
 					s.mu.Lock()
 					s.stats.Skipped++ // кадр был нужен по расписанию, но кодер не успел его взять
 					s.mu.Unlock()
@@ -257,6 +257,7 @@ func (s *Stream) run(started chan<- error) {
 				fps = uint32(p.fps)
 				frameDur = time.Second / time.Duration(fps)
 				fd = int64(frameDur / 100)
+				sch = schedule{fd: fd}
 			}
 			ow, oh = fit(int(c.size.W), int(c.size.H), p.w, p.h)
 			s.sizeReq.Store(0) // ступень от прошлого качества больше не нужна
@@ -278,7 +279,7 @@ func (s *Stream) run(started chan<- error) {
 		}
 		now := time.Now()
 		repeat := !fresh && !lastEnc.IsZero() && now.Sub(lastEnc) > 500*time.Millisecond
-		onTime := fresh && (lastEnc.IsZero() || freshTS >= due-fd/4)
+		onTime := fresh && (lastEnc.IsZero() || sch.due(freshTS))
 		if (onTime || repeat) && enc.ready() {
 			if s.keyReq.Swap(false) {
 				enc.forceKeyFrame()
@@ -292,10 +293,7 @@ func (s *Stream) run(started chan<- error) {
 			}
 			if tex, err := conv.convert(); err == nil && enc.input(tex, ts, fd) == nil {
 				fresh, lastEnc, lastTS = false, now, ts
-				due += fd
-				if due <= ts { // картинка стояла или отстали - отсчет заново от этого кадра
-					due = ts + fd
-				}
+				sch.sent(ts)
 			}
 		}
 		time.Sleep(time.Millisecond) // чаще не надо: кадры приходят раз в 6-7 мс даже на 165 Гц
@@ -303,3 +301,23 @@ func (s *Stream) run(started chan<- error) {
 }
 
 var ErrUnsupported = errors.New("свой захват недоступен на этом ПК")
+
+// schedule выбирает кадры с захвата так, чтобы в среднем выходило ровно fps,
+// даже когда кадры приходят сеткой монитора 144-165 Гц (по 6-7 мс). Время -
+// метки захвата в единицах 100 нс.
+type schedule struct {
+	fd, next int64 // длительность кадра; когда нужен следующий
+}
+
+// due: кадр с меткой ts пора отправлять (допуск - четверть кадра раньше срока).
+func (c *schedule) due(ts int64) bool { return ts >= c.next-c.fd/4 }
+
+// sent: кадр ts отправлен. Следующий - через fd по расписанию, но не раньше
+// чем через 3/4 fd от этого: после подвисания игры не «догоняем» пачкой кадров
+// по 6 мс (было до 64 к/с и рывки), а начинаем отсчет заново.
+func (c *schedule) sent(ts int64) {
+	c.next += c.fd
+	if c.next < ts+c.fd*3/4 {
+		c.next = ts + c.fd*3/4
+	}
+}

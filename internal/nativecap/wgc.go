@@ -16,6 +16,7 @@ var (
 	iidIFramePoolStatics2          = guid("{589b103f-6bbc-5df5-a991-02e28b3b66d5}")
 	iidIGraphicsCaptureSession2    = guid("{2c39ae40-7d2e-5044-804e-8b6799d4cf9e}")
 	iidIGraphicsCaptureSession3    = guid("{f2cdd966-22ae-5ea1-9596-3a289344c3be}")
+	iidIGraphicsCaptureSession5    = guid("{67c0ea62-1f85-5061-925a-239be0ac09cb}")
 	iidIDirect3DDevice             = guid("{a37624ab-8d5f-4650-9d3e-9eae3d9bc670}")
 	iidIDirect3DDxgiInterfaceAcc   = guid("{a9b3d012-3df2-4ee3-b8d1-8695f457d3c1}")
 	iidIClosable                   = guid("{30d5a829-7fa4-4026-83bb-d75bae4ea99e}")
@@ -36,7 +37,12 @@ type capture struct {
 	session com // IGraphicsCaptureSession
 	size    sizeInt32
 	format  uintptr // формат кадров: BGRA или FP16 (HDR)
+
+	minInterval0 int64 // MinUpdateInterval Windows по умолчанию (100 нс)
 }
+
+// minUpdateInterval - сколько минимум между кадрами захвата (100 нс); <0 - не трогать.
+var minUpdateInterval int64 = 10000
 
 func activationFactory(class string, iid *windows.GUID) (com, error) {
 	s, _ := windows.UTF16FromString(class)
@@ -116,6 +122,15 @@ func newCapture(d *device, window, monitor uintptr, cursor, hdr bool) (*capture,
 	if s3, err := c.session.qi(&iidIGraphicsCaptureSession3); err == nil {
 		s3.call(7, 0) // put_IsBorderRequired(false): без желтой рамки вокруг источника
 		s3.release()
+	}
+	// По умолчанию Windows 11 отдает кадры не чаще чем раз в ~3 обновления
+	// монитора (на 164 Гц - 18 мс, 55 к/с). Снимаем ограничение: 1 мс.
+	if s5, err := c.session.qi(&iidIGraphicsCaptureSession5); err == nil {
+		s5.call(6, uintptr(unsafe.Pointer(&c.minInterval0))) // get_MinUpdateInterval (для проверок)
+		if minUpdateInterval >= 0 {
+			s5.call(7, uintptr(minUpdateInterval)) // put_MinUpdateInterval, единицы 100 нс
+		}
+		s5.release()
 	}
 	if err := hr(c.session.call(6)); err != nil { // StartCapture
 		c.close()

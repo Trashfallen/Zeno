@@ -3,6 +3,7 @@ package nativecap
 // Живые проверки на настоящей видеокарте: ZENO_CAP_TEST=1 go test -run Live -v ./internal/nativecap
 
 import (
+	"fmt"
 	"image"
 	"image/png"
 	"math"
@@ -53,11 +54,15 @@ func TestLiveCaptureCadence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.close()
+	if v := os.Getenv("ZENO_CAP_MININT"); v != "" {
+		fmt.Sscan(v, &minUpdateInterval)
+	}
 	c, err := newCapture(d, 0, monitorAt(0, 0), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.close()
+	t.Logf("MinUpdateInterval: по умолчанию %.1f мс, ставим %d (100 нс)", float64(c.minInterval0)/1e4, minUpdateInterval)
 	var capTS, arrive []int64
 	start := time.Now()
 	for time.Since(start) < 6*time.Second {
