@@ -72,7 +72,16 @@ type App struct {
 func main() {
 	minimized := flag.Bool("minimized", false, "запуститься в трее без окна")
 	afterUpdate := flag.Int("after-update", 0, "PID старой копии после обновления")
+	lanService := flag.String("lan-service", "", "служба virtualZeno (SID владельца)")
+	lanInstall := flag.String("lan-install", "", "поставить службу virtualZeno (SID владельца)")
+	lanUninstall := flag.Bool("lan-uninstall", false, "убрать службу virtualZeno")
+	lanResult := flag.String("lan-result", "", "файл для текста ошибки установки")
 	flag.Parse()
+
+	// служба virtualZeno и ее установка - без окна и без своей папки
+	if lanMain(*lanService, *lanInstall, *lanUninstall, *lanResult) {
+		return
+	}
 
 	// первый запуск из архива: копируемся в свою папку, ставим ярлыки и запускаемся оттуда
 	if *afterUpdate == 0 && installIfNeeded() {
@@ -141,6 +150,7 @@ func (a *App) Quit() {
 		logf("Выход")
 		close(a.quitCh)
 		a.NativeStop()
+		a.lanStop()
 		a.window.Close()
 		if a.trayReady.Load() {
 			systray.Quit()

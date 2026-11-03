@@ -271,6 +271,24 @@ input, textarea, select { font: inherit; color: var(--text); }
 }
 .lb-text { flex: 1; color: var(--muted); font-size: 14px; }
 .lb-text b { color: var(--text); }
+/* virtualZeno и другие встроенные приложения */
+.lanbar { border-left: 3px solid var(--green); }
+.lan-ico { color: var(--green); display: grid; place-items: center; }
+.apps-grid { display: grid; gap: 12px; }
+.app-card {
+  display: flex; align-items: center; gap: 14px; padding: 14px; border-radius: 8px;
+  background: var(--side); border: 1px solid transparent;
+}
+.app-card.on { border-color: var(--green); }
+.app-art {
+  flex: none; width: 64px; height: 64px; border-radius: 14px; display: grid; place-items: center; color: #fff;
+  background: linear-gradient(135deg, #3ba55c, #1abc9c);
+}
+.app-info { flex: 1; min-width: 0; }
+.app-name { color: var(--head); font-weight: 700; font-size: 16px; }
+.app-desc { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.app-state { color: var(--text); font-size: 13px; margin-top: 6px; }
+.app-state b { color: var(--head); }
 
 .messages { flex: 1; overflow-y: auto; padding: 16px 0 8px; user-select: text; }
 .chat-start { padding: 16px 16px 8px; }

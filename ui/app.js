@@ -11,6 +11,7 @@ const MEDIA_DEFAULTS = {
   sounds: true, notifyMessages: true,
   stageHeight: 0, // высота окна звонка, 0 - по умолчанию
   vol: {}, // громкость друзей: { id: { voice, stream, voiceMuted, streamMuted } }, 0-300%
+  lanOn: [], // с кем запущен virtualZeno (локальная сеть)
 };
 // шумодавы на выбор: значение, название, пояснение
 const NS_MODES = [
@@ -160,6 +161,7 @@ function showApp() {
     refreshStun();
     setInterval(refreshStun, 2 * 60 * 1000);
     autoLoop();
+    if (S.media.lanOn.length) lanWant(); // virtualZeno был запущен до выхода - поднимаем сеть снова
     if (!S.friends.length) S.homeTab = "add";
   }
   renderAll();
@@ -174,6 +176,7 @@ function staticIcons() {
   $("#dmCall").innerHTML = icon("phone", 20);
   $("#dmVideo").innerHTML = icon("video", 22);
   $("#dmLink").innerHTML = icon("link", 20);
+  $("#dmApps").innerHTML = icon("apps", 20);
   $("#sendBtn").innerHTML = icon("send", 20);
   $("#vpHang").innerHTML = icon("hang", 22);
   $("#sbHang").innerHTML = icon("hang", 24);
@@ -443,6 +446,7 @@ function renderDM() {
   renderTyping();
   renderMessages(id);
   renderStage();
+  renderLanbar();
 }
 
 function linkify(text) {
@@ -600,6 +604,7 @@ function onPeerState(id, st) {
     if (!p.helloSent) {
       p.helloSent = true;
       p.send({ k: "hello", nick: S.me.nick, color: S.me.color, v: S.version });
+      lanAnnounce(id);
       sfx.play("connect");
       toast(`Соединено с ${f.nick}`, "ok");
       closeConnectModal(id);
@@ -704,6 +709,11 @@ async function onPeerMessage(id, m) {
     case "nscreen-stop":
       closeNativeIn();
       renderStage();
+      break;
+    case "lan-state":
+    case "lan-offer":
+    case "lan-answer":
+      await onLanMessage(id, m);
       break;
     case "state":
       if (!m.screen) closeNativeIn();
@@ -1676,6 +1686,214 @@ function closeNativeIn() {
 function remoteScreen(p) {
   return (S.nsIn && S.nsIn.track) || p.remoteTrack("screen");
 }
+
+// ---------- встроенные приложения ----------
+// Как «Активности» в Discord: приложения, которые запускают вдвоем с другом.
+// virtualZeno - локальная сеть (как Hamachi): у обоих появляются адреса
+// 10.77.x.y, по ним работают ping, LAN-игры и общие папки. Сеть поднимается,
+// только если virtualZeno запустили оба. Договариваемся по каналу данных:
+// lan-state (запущен или нет), lan-offer -> lan-answer (соединение между
+// программами, internal/vlan). Соединение предлагает тот, у кого ключ меньше.
+
+const APPS = [
+  {
+    id: "vlan", name: "virtualZeno", icon: "lan",
+    desc: "Локальная сеть с другом, как Hamachi: LAN-игры, общие папки и ping по адресам 10.77.x.y. Включается, когда запустили оба.",
+  },
+];
+
+S.lanRemote = new Map(); // id -> друг запустил virtualZeno у себя
+S.lanSt = null; // последний ответ lan/status
+S.lanOfferAt = new Map(); // id -> когда последний раз предлагали соединение
+
+const lanOn = (id) => S.media.lanOn.includes(id);
+
+function lanAnnounce(id) {
+  const p = peerOf(id);
+  if (p) p.send({ k: "lan-state", on: lanOn(id) });
+}
+
+function lanWant() {
+  api("lan/want", { on: S.media.lanOn.length > 0 }).catch(() => {});
+}
+
+// lanReady: служба стоит и подходит; нет - предлагаем поставить (один раз, UAC)
+async function lanReady() {
+  const st = await api("lan/status");
+  const old = /устарела/.test(st.error || "");
+  if (st.service !== "missing" && !old) return true;
+  return new Promise((resolve) => {
+    const err = h("div", { class: "form-error" });
+    const go = h("button", { class: "btn primary" }, old ? "Обновить" : "Установить");
+    const m = modal({
+      title: old ? "Обновить virtualZeno" : "Установка virtualZeno",
+      body: [
+        h("p", { class: "hint" }, "virtualZeno ставит сетевой адаптер Wintun - драйвер от создателей WireGuard. Для этого Windows один раз спросит разрешение администратора."),
+        h("p", { class: "hint" }, "В Program Files\\Zeno ляжет служба virtualZeno: она держит адаптер и запускается вместе с Windows. Брандмауэр пропустит входящие только с адресов virtualZeno (10.77.x.y) - друг увидит ваши игры и общие папки, пока сеть включена."),
+        h("p", { class: "hint" }, "Убрать адаптер и службу можно в Настройки → Соединение."),
+        err,
+      ],
+      foot: [h("button", { class: "btn ghost", onclick: () => m.close() }, "Отмена"), go],
+      onClose: () => resolve(false),
+    });
+    go.onclick = async () => {
+      go.disabled = true;
+      go.textContent = "Жду разрешения…";
+      err.textContent = "";
+      try {
+        await api("lan/install");
+        resolve(true);
+        m.close();
+      } catch (e) {
+        err.textContent = e.message;
+        go.disabled = false;
+        go.textContent = "Попробовать снова";
+      }
+    };
+  });
+}
+
+async function lanStart(id) {
+  if (lanOn(id)) return;
+  try {
+    if (!(await lanReady())) return;
+  } catch (e) { fail(e); return; }
+  S.media.lanOn = [...S.media.lanOn, id];
+  saveMedia();
+  lanWant();
+  lanAnnounce(id);
+  sfx.play("connect");
+  await lanTick();
+}
+
+function lanExit(id) {
+  if (!lanOn(id)) return;
+  S.media.lanOn = S.media.lanOn.filter((x) => x !== id);
+  saveMedia();
+  lanAnnounce(id);
+  api("lan/close", { friend: id }).catch(() => {});
+  lanWant();
+  lanTick();
+}
+
+async function onLanMessage(id, m) {
+  const p = peerOf(id);
+  switch (m.k) {
+    case "lan-state": {
+      const was = S.lanRemote.get(id);
+      S.lanRemote.set(id, !!m.on);
+      if (!m.on) api("lan/close", { friend: id }).catch(() => {});
+      else if (!was && !lanOn(id)) toast(`${fr(id).nick} запустил virtualZeno - присоединяйтесь в чате с ним`, "ok");
+      await lanTick();
+      break;
+    }
+    case "lan-offer": {
+      if (!lanOn(id) || typeof m.sdp !== "string") {
+        lanAnnounce(id); // мы не запускали - друг узнает и не будет ждать
+        break;
+      }
+      const r = await api("lan/accept", { friend: id, sdp: m.sdp, ice: iceServers() });
+      p.send({ k: "lan-answer", sdp: r.sdp });
+      break;
+    }
+    case "lan-answer":
+      if (typeof m.sdp === "string") await api("lan/answer", { friend: id, sdp: m.sdp }).catch(() => {});
+      break;
+  }
+}
+
+async function lanOffer(id) {
+  const r = await api("lan/offer", { friend: id, ice: iceServers() });
+  const p = peerOf(id);
+  if (p && lanOn(id)) p.send({ k: "lan-offer", sdp: r.sdp });
+}
+
+// lanTick: состояние сети для полоски в чате; соединение упало или застряло - предлагаем снова
+async function lanTick() {
+  const ids = S.friends.map((f) => f.id).filter((id) => lanOn(id) || S.lanRemote.get(id));
+  if (!ids.length && !S.lanSt) return;
+  try { S.lanSt = await api("lan/status", { friends: ids }); } catch (e) { return; }
+  for (const id of ids) {
+    if (!lanOn(id) || !S.lanRemote.get(id) || !isConnected(id) || S.me.id > id) continue;
+    const st = (S.lanSt.links[id] || {}).state || "none";
+    const at = S.lanOfferAt.get(id) || 0;
+    const dead = ["none", "failed", "closed"].includes(st);
+    const stuck = st !== "connected" && st !== "disconnected" && Date.now() - at > 15000;
+    if ((!dead && !stuck) || Date.now() - at < 8000) continue;
+    S.lanOfferAt.set(id, Date.now());
+    lanOffer(id).catch((e) => console.warn("virtualZeno:", e));
+  }
+  if (!ids.length) S.lanSt = null;
+  renderLanbar();
+}
+
+setInterval(lanTick, 2000);
+
+const LAN_STATES = {
+  connected: "соединено", connecting: "соединяюсь…", new: "соединяюсь…", checking: "соединяюсь…",
+  disconnected: "связь прерывается…", failed: "нет связи, пробую снова", closed: "нет связи, пробую снова", none: "соединяюсь…",
+};
+
+// lanLine - что сейчас с virtualZeno у этого друга: { text, on, remote }
+function lanLine(id) {
+  const f = fr(id);
+  const on = lanOn(id);
+  const remote = !!S.lanRemote.get(id);
+  const st = S.lanSt;
+  const link = (st && st.links[id]) || {};
+  const me = st ? st.me : "";
+  let text;
+  if (on && st && st.error) text = `Ошибка: ${esc(st.error)}`;
+  else if (on && remote) {
+    const ping = link.state === "connected" && link.rtt ? ` · пинг ${link.rtt < 10 ? link.rtt.toFixed(1) : Math.round(link.rtt)} мс` : "";
+    text = `Вы <b>${me}</b> · ${esc(f.nick)} <b>${link.addr || ""}</b> · ${LAN_STATES[link.state] || link.state || ""}${ping}`;
+    if (st && !st.up) text += " · поднимаю адаптер…";
+  } else if (on) text = `Ваш адрес <b>${me}</b>. Ждем, когда <b>${esc(f.nick)}</b> тоже запустит virtualZeno.`;
+  else if (remote) text = `<b>${esc(f.nick)}</b> запустил virtualZeno - локальную сеть для игр и общих папок.`;
+  return { text, on, remote, addr: link.addr };
+}
+
+function renderLanbar() {
+  const bar = $("#lanbar");
+  if (!bar) return;
+  const id = S.view === "dm" ? S.sel : null;
+  const l = id && fr(id) ? lanLine(id) : null;
+  bar.hidden = !l || (!l.on && !l.remote);
+  if (bar.hidden) return;
+  const btns = [];
+  if (l.on && l.remote && l.addr) {
+    btns.push(h("button", { class: "btn small ghost", title: "Скопировать адрес друга", html: icon("copy", 16), onclick: () => copyText(l.addr).then(() => toast("Адрес скопирован", "ok")) }));
+  }
+  btns.push(l.on
+    ? h("button", { class: "btn small", onclick: () => lanExit(id) }, "Выйти")
+    : h("button", { class: "btn small green", onclick: () => lanStart(id) }, "Присоединиться"));
+  bar.replaceChildren(h("span", { class: "lan-ico", html: icon("lan", 18) }), h("div", { class: "lb-text", html: `<b>virtualZeno</b> · ${l.text}` }), ...btns);
+}
+
+function openApps(id) {
+  const f = fr(id);
+  if (!f) return;
+  const grid = h("div", { class: "apps-grid" });
+  const m = modal({ title: "Приложения", sub: `Запускаются вдвоем с ${f.nick}`, body: grid, wide: true });
+  const draw = () => {
+    grid.replaceChildren(...APPS.map((a) => {
+      const l = lanLine(id);
+      const btn = l.on
+        ? h("button", { class: "btn small", onclick: () => { lanExit(id); draw(); } }, "Выйти")
+        : h("button", { class: "btn small " + (l.remote ? "green" : "primary"), onclick: async () => { await lanStart(id); if (lanOn(id)) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
+      return h("div", { class: "app-card" + (l.on ? " on" : "") },
+        h("div", { class: "app-art", html: icon(a.icon, 40) }),
+        h("div", { class: "app-info" },
+          h("div", { class: "app-name" }, a.name),
+          h("div", { class: "app-desc" }, a.desc),
+          l.text ? h("div", { class: "app-state", html: l.text }) : null),
+        btn);
+    }));
+  };
+  draw();
+}
+
+$("#dmApps").onclick = () => openApps(S.sel);
 
 // nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп
 async function nativeTick() {
@@ -2714,6 +2932,38 @@ function secNet() {
     h("h3", {}, "Серверы для коротких кодов"),
     h("p", { class: "hint" }, "Публичные MQTT-брокеры - через них передаются только зашифрованные длинные коды. По одному в строке (tcp://host:1883). Пусто - встроенный список."),
     brokers,
+    ...secLan(),
+  ];
+}
+
+// secLan - адаптер virtualZeno: что стоит и кнопка «убрать все»
+function secLan() {
+  const info = h("p", { class: "hint" }, "Проверяю…");
+  const del = h("button", { class: "btn small danger", hidden: true }, "Удалить адаптер и службу");
+  api("lan/status").then((st) => {
+    const svc = { missing: "не установлены", running: "служба работает", stopped: "служба остановлена" }[st.service] || st.service;
+    info.textContent = `Адаптер и служба: ${svc}. Ваш адрес в сети virtualZeno: ${st.me}.` + (st.version ? ` Служба из Zeno ${st.version}.` : "");
+    del.hidden = st.service === "missing";
+  }).catch((e) => { info.textContent = e.message; });
+  del.onclick = async () => {
+    if (!confirm("Убрать адаптер virtualZeno, службу и правило брандмауэра? Windows спросит разрешение администратора. Запустить virtualZeno потом можно снова - с установкой.")) return;
+    del.disabled = true;
+    try {
+      const ids = S.media.lanOn;
+      S.media.lanOn = [];
+      saveMedia();
+      ids.forEach(lanAnnounce);
+      await api("lan/uninstall");
+      info.textContent = "Адаптер и служба убраны.";
+      del.hidden = true;
+    } catch (e) { fail(e); }
+    del.disabled = false;
+  };
+  return [
+    h("h3", {}, "virtualZeno (локальная сеть)"),
+    h("p", { class: "hint" }, "Встроенное приложение «Приложения» в чате с другом: адаптер Wintun и адреса 10.77.x.y для LAN-игр и общих папок. Работает, только пока его запустили оба."),
+    info,
+    del,
   ];
 }
 

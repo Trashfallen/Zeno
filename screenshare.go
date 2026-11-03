@@ -86,6 +86,37 @@ type iceServer struct {
 	Credential string `json:"credential"`
 }
 
+type iceEntry struct {
+	URLs                 []string
+	Username, Credential string
+}
+
+// parseICE - список STUN/TURN из страницы (urls - строка или массив).
+func parseICE(v any) []iceEntry {
+	var out []iceEntry
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var list []iceServer
+	_ = json.Unmarshal(b, &list)
+	for _, s := range list {
+		var urls []string
+		switch u := s.URLs.(type) {
+		case string:
+			urls = []string{u}
+		case []any:
+			for _, x := range u {
+				if v, ok := x.(string); ok {
+					urls = append(urls, v)
+				}
+			}
+		}
+		out = append(out, iceEntry{URLs: urls, Username: s.Username, Credential: s.Credential})
+	}
+	return out
+}
+
 // NativeStart запускает свой захват источника id и возвращает предложение SDP
 // для браузера друга.
 func (a *App) NativeStart(body M) (any, error) {
@@ -102,23 +133,8 @@ func (a *App) NativeStart(body M) (any, error) {
 		o.Monitor = nativecap.MonitorAt(x, y)
 	}
 	var ice []nativecap.ICEServer
-	if b, err := json.Marshal(body["ice"]); err == nil {
-		var list []iceServer
-		_ = json.Unmarshal(b, &list)
-		for _, s := range list {
-			var urls []string
-			switch u := s.URLs.(type) {
-			case string:
-				urls = []string{u}
-			case []any:
-				for _, x := range u {
-					if v, ok := x.(string); ok {
-						urls = append(urls, v)
-					}
-				}
-			}
-			ice = append(ice, nativecap.ICEServer{URLs: urls, Username: s.Username, Credential: s.Credential})
-		}
+	for _, x := range parseICE(body["ice"]) {
+		ice = append(ice, nativecap.ICEServer{URLs: x.URLs, Username: x.Username, Credential: x.Credential})
 	}
 	a.NativeStop()
 	snd, sdp, err := nativecap.NewSender(o, ice)

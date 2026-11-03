@@ -352,5 +352,8 @@ func (s *Server) route(path string, body M) (any, error) {
 		}
 		return nil, acc.AppendHistory(str(body, "friend"), m)
 	}
+	if strings.HasPrefix(path, "lan/") {
+		return app.lanRoute(path, body)
+	}
 	return nil, errNotFound
 }
