@@ -201,6 +201,13 @@ func (s *Server) route(path string, body M) (any, error) {
 		on, _ := body["active"].(bool)
 		app.SetCaptureActive(on)
 		return nil, nil
+	case "screen/sources":
+		return M{"sources": app.ScreenSources()}, nil
+	case "screen/pick":
+		return nil, app.ScreenPick(str(body, "id"))
+	case "screen/picked":
+		app.ScreenPicked()
+		return nil, nil
 	case "net/stun":
 		return app.stun.Info(), nil
 	case "ring":

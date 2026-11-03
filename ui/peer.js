@@ -23,9 +23,12 @@ export const isOldDefaultStun = (s) => s === OLD_DEFAULT_STUN;
 
 export const SCREEN_PRESETS = {
   "720p30": { w: 1280, h: 720, fps: 30, kbps: 3500, label: "720p, 30 к/с" },
+  "720p60": { w: 1280, h: 720, fps: 60, kbps: 5500, label: "720p, 60 к/с" },
   "1080p30": { w: 1920, h: 1080, fps: 30, kbps: 6000, label: "1080p, 30 к/с" },
   "1080p60": { w: 1920, h: 1080, fps: 60, kbps: 10000, label: "1080p, 60 к/с" },
+  "1440p30": { w: 2560, h: 1440, fps: 30, kbps: 10000, label: "1440p, 30 к/с" },
   "1440p60": { w: 2560, h: 1440, fps: 60, kbps: 16000, label: "1440p, 60 к/с" },
+  "source30": { w: 7680, h: 4320, fps: 30, kbps: 14000, label: "Исходное, 30 к/с" },
   "source60": { w: 7680, h: 4320, fps: 60, kbps: 20000, label: "Исходное, 60 к/с" },
 };
 

@@ -85,6 +85,8 @@ const P = {
   send: '<path d="M4 12 20 4l-6 16-3-7z"/>',
   expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   shrink: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
+  theater: '<rect x="2" y="6" width="20" height="12" rx="2"/>',
+  theaterOff: '<rect x="5" y="5" width="14" height="14" rx="2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
   chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
   check: '<path d="m5 12 5 5 9-10"/>',

@@ -1372,14 +1372,167 @@ function stopCam(silent) {
 
 async function startScreen() {
   if (!S.call || S.call.state !== "active") return toast("Трансляция работает во время звонка", "err");
+  openScreenPicker();
+}
+
+// ---------- свое окно выбора трансляции ----------
+// Родной диалог Chromium не настраивается. Показываем свой список (окна и
+// экраны с превью дает программа), а после выбора программа сама проходит
+// родной диалог, накрыв окно снимком. id = null - просто родной диалог.
+
+const RES_CHOICES = [["720p", "720p"], ["1080p", "1080p"], ["1440p", "1440p"], ["source", "Исходное"]];
+const presetParts = () => {
+  const m = /^(720p|1080p|1440p|source)(30|60)$/.exec(S.media.screenPreset) || [0, "1080p", "60"];
+  return { res: m[1], fps: m[2] };
+};
+
+function chipGroup(options, value, onPick) {
+  const g = h("div", { class: "sp-chips" });
+  const paint = (v) => [...g.children].forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+  for (const [v, label] of options) {
+    g.append(h("button", { class: "sp-chip", "data-v": v, onclick: () => { paint(v); onPick(v); } }, label));
+  }
+  paint(value);
+  return g;
+}
+
+function openScreenPicker() {
+  let tab = "window";
+  let sel = null;
+  let list = [];
+  let timer = 0;
+  let closed = false;
+
+  const grid = h("div", { class: "sp-grid" }, h("div", { class: "sp-empty" }, h("i", { class: "spinner" }), "Ищу окна и экраны…"));
+  const tabBtn = (k, label) => h("button", { class: "sp-tab", "data-k": k, onclick: () => { tab = k; paint(); } }, label, h("span", { class: "sp-count" }));
+  const tabs = h("div", { class: "sp-tabs" }, tabBtn("window", "Приложения"), tabBtn("screen", "Экраны"));
+  const go = h("button", { class: "btn primary sp-go", disabled: true, html: icon("screen", 18) + "Начать трансляцию", onclick: () => live(sel) });
+
+  const setPreset = (part) => {
+    const p = { ...presetParts(), ...part };
+    setMedia({ screenPreset: p.res + p.fps }, tuneScreen);
+  };
+  const audio = h("input", { type: "checkbox" });
+  audio.checked = !!S.media.screenAudio;
+  audio.onchange = () => setMedia({ screenAudio: audio.checked }, applyScreenAudio);
+
+  const settings = h("div", { class: "sp-settings" },
+    h("div", { class: "sp-set" }, h("div", { class: "sp-label" }, "Разрешение"),
+      chipGroup(RES_CHOICES, presetParts().res, (v) => setPreset({ res: v }))),
+    h("div", { class: "sp-set" }, h("div", { class: "sp-label" }, "Частота кадров"),
+      chipGroup([["30", "30 к/с"], ["60", "60 к/с"]], presetParts().fps, (v) => setPreset({ fps: v }))),
+    h("div", { class: "sp-set" }, h("div", { class: "sp-label" }, "Режим"),
+      chipGroup([["motion", "Плавность"], ["detail", "Четкость"]], S.media.screenMode, (v) => setMedia({ screenMode: v }, tuneScreen))),
+    h("label", { class: "sp-set sp-audio" },
+      h("div", {}, h("div", { class: "sp-label" }, "Звук системы"), h("div", { class: "sp-hint" }, "Можно включить и выключить во время трансляции")),
+      h("span", { class: "switch" }, audio, h("i"))));
+
+  const box = h("div", { class: "modal sp-modal" },
+    h("div", { class: "sp-head" },
+      h("h2", {}, "Трансляция экрана"),
+      h("button", { class: "sp-x", title: "Закрыть (Esc)", html: icon("x", 20), onclick: () => close() })),
+    tabs, grid, settings,
+    h("div", { class: "modal-foot sp-foot" },
+      h("button", { class: "btn ghost sp-native", title: "Открыть стандартное окно выбора Windows", onclick: () => live(null) }, "Системное окно"),
+      h("div", { class: "spacer" }),
+      h("button", { class: "btn ghost", onclick: () => close() }, "Отмена"),
+      go));
+  const ov = h("div", { class: "overlay sp-overlay" }, box);
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+    if (e.key === "Enter" && sel && !e.target.closest("button:not(.sp-card), input")) {
+      e.preventDefault();
+      live(sel);
+    }
+  };
+  function close() {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    ov.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  ov.addEventListener("mousedown", (e) => { if (e.target === ov) close(); });
+  document.addEventListener("keydown", onKey);
+  $("#modals").append(ov);
+
+  function live(id) {
+    close();
+    beginScreen(id).catch(fail);
+  }
+
+  function card(s) {
+    const img = h("img", { class: "sp-img", src: s.thumb || "", alt: "", draggable: "false" });
+    if (!s.thumb) img.hidden = true;
+    const c = h("button", { class: "sp-card" + (s.id === sel ? " on" : ""), "data-id": s.id, title: s.name,
+      onclick: () => { sel = s.id; paint(); },
+      ondblclick: () => live(s.id) },
+    h("div", { class: "sp-thumb" }, img, s.kind === "screen" && !s.thumb ? h("span", { html: icon("screen", 36) }) : null),
+    h("div", { class: "sp-name" },
+      s.icon ? h("img", { class: "sp-icon", src: s.icon, alt: "" }) : h("span", { class: "sp-icon-ph", html: icon(s.kind === "screen" ? "screen" : "dots", 14) }),
+      h("span", {}, s.name)));
+    return c;
+  }
+
+  function paint() {
+    for (const b of tabs.children) {
+      b.classList.toggle("on", b.dataset.k === tab);
+      b.querySelector(".sp-count").textContent = String(list.filter((s) => s.kind === b.dataset.k).length || "");
+    }
+    const items = list.filter((s) => s.kind === tab);
+    if (sel && !list.some((s) => s.id === sel)) sel = null;
+    go.disabled = !sel;
+    if (!list.length) return;
+    // карточки обновляем на месте, чтобы превью не мигали и прокрутка не сбрасывалась
+    const have = new Map([...grid.querySelectorAll(".sp-card")].map((c) => [c.dataset.id, c]));
+    const next = items.map((s) => {
+      const c = have.get(s.id);
+      if (!c) return card(s);
+      c.classList.toggle("on", s.id === sel);
+      const img = c.querySelector(".sp-img");
+      if (s.thumb) { img.src = s.thumb; img.hidden = false; }
+      c.querySelector(".sp-name > span:last-child").textContent = s.name;
+      c.title = s.name;
+      return c;
+    });
+    if (!next.length) next.push(h("div", { class: "sp-empty" }, tab === "window" ? "Открытых окон нет" : "Экраны не найдены"));
+    grid.replaceChildren(...next);
+  }
+
+  async function load(first) {
+    try {
+      const r = await api("screen/sources");
+      if (closed) return;
+      list = r.sources || [];
+      if (first && !list.some((s) => s.kind === "window")) tab = "screen";
+      paint();
+    } catch (e) {
+      if (first) grid.replaceChildren(h("div", { class: "sp-empty" }, "Список не получен: " + e.message));
+    }
+    if (!closed) timer = setTimeout(() => load(false), 2500); // живые превью
+  }
+  paint();
+  load(true);
+}
+
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+async function beginScreen(id) {
+  if (!S.call || S.call.state !== "active") return;
   const pr = SCREEN_PRESETS[S.media.screenPreset] || SCREEN_PRESETS["1080p60"];
-  const withAudio = S.media.screenAudio;
+  if (id) {
+    // свое окно уже закрыто - ждем пару кадров, чтобы на снимке его не было
+    await nextFrame();
+    await nextFrame();
+    try { await api("screen/pick", { id }); } catch (e) { toast(e.message, "err"); id = null; }
+  }
   let stream;
   try {
+    // звук берем всегда: отправлять его или нет, решает галочка, без перезапуска трансляции
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: { width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: pr.fps, max: pr.fps } },
-      audio: withAudio ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false, restrictOwnAudio: true } : false,
-      systemAudio: withAudio ? "include" : "exclude",
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false, restrictOwnAudio: true },
+      systemAudio: "include",
       selfBrowserSurface: "exclude",
       surfaceSwitching: "include",
       monitorTypeSurfaces: "include",
@@ -1387,6 +1540,8 @@ async function startScreen() {
   } catch (e) {
     if (e.name !== "NotAllowedError" && e.name !== "AbortError") fail(new Error("Не удалось начать трансляцию: " + e.message));
     return;
+  } finally {
+    if (id) api("screen/picked").catch(() => {});
   }
   if (!S.call) {
     stream.getTracks().forEach((t) => t.stop());
@@ -1398,8 +1553,7 @@ async function startScreen() {
   v.onended = () => stopScreen();
   const p = peerOf(S.call.id);
   await p.setTrack("screen", v);
-  const a = stream.getAudioTracks()[0];
-  if (a) await p.setTrack("sys", a);
+  await applyScreenAudio();
   await tuneScreen();
   api("capturebar", { active: true }).catch(() => {});
   sfx.play("stream");
@@ -1421,7 +1575,7 @@ async function tuneScreen() {
   // и разрешение; maintain-framerate в таких условиях скатывался до 320x180
   await p.tuneSender("screen", { maxBitrate: pr.kbps * 1000, maxFramerate: pr.fps, scaleResolutionDownBy: scale },
     motion ? "balanced" : "maintain-resolution");
-  if (S.screen.getAudioTracks().length) await p.tuneSender("sys", { maxBitrate: 128000 });
+  if (S.screen.getAudioTracks().length && S.media.screenAudio) await p.tuneSender("sys", { maxBitrate: 128000 });
 }
 
 function stopScreen(silent) {
@@ -1457,12 +1611,22 @@ $("#sbScreenOpts").onclick = (e) => {
     menuItem("Плавность (игры, видео)", S.media.screenMode === "motion", () => setMedia({ screenMode: "motion" }, tuneScreen)),
     menuItem("Четкость (текст, код)", S.media.screenMode === "detail", () => setMedia({ screenMode: "detail" }, tuneScreen)),
     h("div", { class: "menu-sep" }),
-    menuItem("Звук системы", S.media.screenAudio, () => {
-      setMedia({ screenAudio: !S.media.screenAudio });
-      if (S.screen) toast("Звук включится при следующем запуске трансляции");
-    }));
+    menuItem("Звук системы", S.media.screenAudio, () => setMedia({ screenAudio: !S.media.screenAudio }, applyScreenAudio)));
   openMenu(e.currentTarget, items, "up");
 };
+
+// applyScreenAudio: звук трансляции захвачен всегда, галочка только включает его отправку
+async function applyScreenAudio() {
+  if (!S.screen || !S.call) return;
+  const a = S.screen.getAudioTracks()[0];
+  if (!a) {
+    if (S.media.screenAudio) toast("Этот источник не отдает звук системы", "err");
+    return;
+  }
+  const p = peerOf(S.call.id);
+  await p.setTrack("sys", S.media.screenAudio ? a : null);
+  if (S.media.screenAudio) await p.tuneSender("sys", { maxBitrate: 128000 });
+}
 
 function menuItem(label, on, fn, cls = "") {
   return h("button", { class: "menu-item" + (on ? " on" : "") + (cls ? " " + cls : ""), onclick: () => { closeMenu(); fn(); } }, label);
@@ -1577,6 +1741,8 @@ function renderStage() {
       h("div", { class: "tile-label" }, me ? "Ваша трансляция" : `${f.nick} транслирует экран`),
       h("div", { class: "stats", hidden: !S.showStats }),
       h("div", { class: "tile-actions" },
+        h("button", { class: "ta-btn", title: cinema() ? "Обычный вид (T)" : "Режим кинотеатра (T)", html: icon(cinema() ? "theaterOff" : "theater", 18),
+          onclick: (e) => { e.stopPropagation(); toggleTheater(); } }),
         h("button", { class: "ta-btn", title: S.full ? "Выйти из полноэкранного (Esc)" : "Во весь экран", html: icon(S.full ? "shrink" : "expand", 18),
           onclick: (e) => { e.stopPropagation(); setFull(!S.full); } }),
         h("button", { class: "ta-btn", title: "Еще", html: icon("dots", 18),
@@ -1633,15 +1799,29 @@ function renderStage() {
   $("#sbCollapse").hidden = !screens.length;
   $("#sbFull").innerHTML = icon(S.full ? "shrink" : "expand", 20);
   $("#sbFull").title = S.full ? "Выйти из полноэкранного (Esc)" : "Во весь экран";
+  $("#sbTheater").innerHTML = icon(cinema() ? "theaterOff" : "theater", 20);
+  $("#sbTheater").classList.toggle("on", cinema());
+  $("#sbTheater").title = cinema() ? "Обычный вид (T)" : "Режим кинотеатра (T)";
   applyStageHeight();
 }
 
 const isTheater = () => document.body.classList.contains("theater");
+// cinema: режим кинотеатра - сцена на все окно приложения, но не на весь монитор
+const cinema = () => isTheater() && !S.full;
 
 function setTheater(on) {
   if (!on && S.full) return setFull(false);
   document.body.classList.toggle("theater", on);
   renderStage();
+}
+
+// toggleTheater: из полного экрана кнопка кинотеатра возвращает окно, но оставляет сцену на все окно
+function toggleTheater() {
+  if (S.full) {
+    setFull(false);
+    return setTheater(true);
+  }
+  setTheater(!isTheater());
 }
 
 // setFull: трансляция на весь экран - окно без рамки на весь монитор + сцена на все окно
@@ -1672,7 +1852,7 @@ function screenMenu(e, who) {
   const items = [
     h("div", { class: "menu-title" }, me ? "Ваша трансляция" : "Трансляция " + fr(id).nick),
     menuItem(S.full ? "Выйти из полноэкранного" : "Во весь экран", false, () => setFull(!S.full)),
-    menuItem(isTheater() && !S.full ? "Обычный вид" : "Во всё окно", false, () => setTheater(!(isTheater() && !S.full))),
+    menuItem(cinema() ? "Обычный вид" : "Режим кинотеатра", false, toggleTheater),
     menuItem("Статистика", S.showStats, () => { S.showStats = !S.showStats; renderStage(); }),
     menuItem("Сохранить кадр", false, () => snapshot(who).catch(fail)),
   ];
@@ -1763,6 +1943,7 @@ function applyStageHeight() {
 })();
 
 $("#sbFull").onclick = () => setFull(!S.full);
+$("#sbTheater").onclick = toggleTheater;
 // stripHidden: в обычном виде участники видны, пока их не скрыли; во весь экран - наоборот
 S.hideStrip = false;
 const stripHidden = () => (isTheater() ? !S.showStrip : S.hideStrip);
@@ -1803,7 +1984,7 @@ $("#sbCamOpts").onclick = async (e) => {
 $("#sbMore").onclick = (e) => {
   const scr = S.screen ? "myscreen" : (S.call && (S.remote.get(S.call.id) || {}).screen ? "theirscreen" : null);
   openMenu(e.currentTarget, [
-    menuItem(isTheater() && !S.full ? "Обычный вид" : "Во всё окно", false, () => setTheater(!(isTheater() && !S.full))),
+    menuItem(cinema() ? "Обычный вид" : "Режим кинотеатра", false, toggleTheater),
     menuItem("Статистика", S.showStats, () => { S.showStats = !S.showStats; renderStage(); }),
     scr ? menuItem("Сохранить кадр трансляции", false, () => snapshot(scr).catch(fail)) : null,
     h("div", { class: "menu-sep" }),
@@ -2268,7 +2449,7 @@ function secScreen() {
     h("p", { class: "hint" }, "Для 1080p 60 к/с нужна исходящая скорость около 10 Мбит/с у того, кто показывает. Если канала не хватает, движок сам снизит качество."),
     h("h3", {}, "Режим"),
     h("div", { class: "field" }, selectEl([["motion", "Плавность - держать частоту кадров (игры, видео)"], ["detail", "Четкость - держать резкость (текст, код)"]], S.media.screenMode, (v) => setMedia({ screenMode: v }, tuneScreen))),
-    switchRow("Звук системы", "Друг слышит звук игры или видео вместе с картинкой.", S.media.screenAudio, (v) => setMedia({ screenAudio: v })),
+    switchRow("Звук системы", "Друг слышит звук игры или видео вместе с картинкой.", S.media.screenAudio, (v) => setMedia({ screenAudio: v }, applyScreenAudio)),
     h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Кодек"),
       h("div", { class: "rs-sub" }, "H.264 кодируется видеокартой и почти не грузит процессор. Применяется со следующего соединения.")),
       selectEl([["h264", "H.264 (рекомендуется)"], ["vp9", "VP9"], ["av1", "AV1"], ["vp8", "VP8"], ["auto", "Как решит движок"]], S.media.codec, (v) => setMedia({ codec: v }))),
@@ -2381,6 +2562,12 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && e.code === "KeyD") {
     e.preventDefault();
     setDeaf(!S.deaf);
+  }
+  // T - кинотеатр, как на YouTube; не когда печатают
+  if (e.code === "KeyT" && !e.ctrlKey && !e.altKey && !e.metaKey && S.call && S.call.state === "active" &&
+      !e.target.closest("input, textarea, [contenteditable]") && !document.querySelector(".overlay, .settings, .menu")) {
+    e.preventDefault();
+    toggleTheater();
   }
 });
 
