@@ -1967,8 +1967,8 @@ async function tuneScreen(keepStep) {
   const motion = S.media.screenMode === "motion";
   v.contentHint = motion ? "motion" : "detail";
   if (S.native) {
-    // картинку шлет программа: на лету меняется битрейт, разрешение и частота - со следующей трансляции
-    await api("nscreen/quality", { kbps: pr.kbps }).catch(() => {});
+    // картинку шлет программа: разрешение, частота и битрейт меняются сразу, без перезапуска трансляции
+    await api("nscreen/quality", { w: pr.w, h: pr.h, fps: pr.fps, kbps: pr.kbps }).catch(() => {});
     if (S.screen.getAudioTracks().length && S.media.screenAudio) await p.tuneSender("sys", { maxBitrate: 128000 });
     return;
   }

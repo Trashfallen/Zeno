@@ -8,6 +8,7 @@ package nativecap
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/interceptor"
@@ -27,11 +28,13 @@ type Sender struct {
 	stream  *Stream
 	maxKbps int
 
-	fps int
+	ladderReset atomic.Bool
 
 	mu      sync.Mutex
-	kbps    int // битрейт кодера сейчас
-	target  int // оценка канала (GCC), кбит/с
+	fps     int
+	preset  [3]int // w, h, fps выбранного качества
+	kbps    int    // битрейт кодера сейчас
+	target  int    // оценка канала (GCC), кбит/с
 	rtpBase uint32
 	state   string
 	closed  bool
@@ -110,6 +113,7 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	if s.fps <= 0 {
 		s.fps = 60
 	}
+	s.preset = [3]int{o.W, o.H, s.fps}
 	s.pkt = rtp.NewPacketizer(1200, 0, 0, &codecs.H264Payloader{}, rtp.NewRandomSequencer(), 90000)
 	s.rtpBase = uint32(time.Now().UnixNano())
 	fail := func(err error) (*Sender, string, error) {
@@ -210,14 +214,17 @@ func (s *Sender) onTarget(bps int) {
 	}
 }
 
-// Ступени разрешения от исходного: при узком канале лучше меньше пикселей,
-// чем квадраты. Мера - бит на пиксель кадра: ниже 0,04 картинка сыплется.
-var ladderSteps = []float64{1, 0.75, 0.6, 0.5}
+// Ступени разрешения от выбранного пользователем: при узком канале лучше
+// меньше пикселей, чем квадраты. Мера - бит на пиксель кадра. Держимся как
+// можно ближе к выбранному: спускаемся мелкими шагами и только когда совсем
+// мало бит, поднимаемся быстро. Ниже 720p (по рамке 1280x720) не опускаемся.
+var ladderSteps = []float64{1, 0.9, 0.8, 0.7, 0.6, 0.5}
 
 const (
-	bppLow    = 0.04 // ниже - снижаем разрешение (3 с подряд)
-	bppHigh   = 0.07 // на ступень выше хватает - возвращаем (10 с подряд)
-	ladderMin = 480  // ниже этой высоты не опускаемся
+	bppLow   = 0.03 // ниже - ступень вниз (4 с подряд)
+	bppHigh  = 0.05 // на ступень выше хватает - ступень вверх (4 с подряд)
+	downSecs = 4
+	upSecs   = 4
 )
 
 func (s *Sender) ladder() {
@@ -230,16 +237,19 @@ func (s *Sender) ladder() {
 			return
 		case <-t.C:
 		}
+		if s.ladderReset.Swap(false) {
+			step, low, high = 0, 0, 0
+		}
 		st := s.stream.Stats()
 		s.mu.Lock()
-		kbps := s.kbps
+		kbps, fps := s.kbps, s.fps
 		s.mu.Unlock()
 		if st.BaseW == 0 {
 			continue
 		}
 		bpp := func(k float64) float64 {
 			w, h := float64(st.BaseW)*k, float64(st.BaseH)*k
-			return float64(kbps) * 1000 / (w * h * float64(s.fps))
+			return float64(kbps) * 1000 / (w * h * float64(fps))
 		}
 		if bpp(ladderSteps[step]) < bppLow {
 			low++
@@ -253,9 +263,9 @@ func (s *Sender) ladder() {
 		}
 		next := step
 		switch {
-		case low >= 3 && step+1 < len(ladderSteps) && float64(st.BaseH)*ladderSteps[step+1] >= ladderMin:
+		case low >= downSecs && step+1 < len(ladderSteps) && !below720(st.BaseW, st.BaseH, ladderSteps[step+1]):
 			next = step + 1
-		case high >= 10:
+		case high >= upSecs:
 			next = step - 1
 		}
 		if next != step {
@@ -274,10 +284,19 @@ func (s *Sender) SetAnswer(sdp string) error {
 	return s.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp})
 }
 
-// SetMaxBitrate - пользователь сменил качество.
-func (s *Sender) SetMaxBitrate(kbps int) {
+// SetQuality - пользователь сменил качество во время трансляции: размер и
+// частота применяются сразу (кодер пересоздается), битрейт - потолок.
+func (s *Sender) SetQuality(w, h, fps, kbps int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if p := [3]int{w, h, fps}; w > 0 && h > 0 && fps > 0 && p != s.preset {
+		s.preset, s.fps = p, fps
+		s.stream.SetPreset(w, h, fps)
+		s.ladderReset.Store(true)
+	}
+	if kbps <= 0 {
+		return
+	}
 	s.maxKbps = kbps
 	s.kbps = max(minKbps, min(s.target, kbps))
 	s.stream.SetBitrate(s.kbps)
@@ -311,4 +330,10 @@ func (s *Sender) Stop() {
 	if s.pc != nil {
 		_ = s.pc.Close()
 	}
+}
+
+// below720: ступень k даст картинку меньше 720p (рамка 1280x720 с теми же пропорциями).
+func below720(baseW, baseH int, k float64) bool {
+	minW, _ := fit(baseW, baseH, 1280, 720)
+	return float64(baseW)*k < float64(minW)-2
 }

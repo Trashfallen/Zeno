@@ -213,8 +213,8 @@ func (s *Server) route(path string, body M) (any, error) {
 	case "nscreen/answer":
 		return nil, app.NativeAnswer(str(body, "sdp"))
 	case "nscreen/quality":
-		kbps, _ := body["kbps"].(float64)
-		app.NativeQuality(int(kbps))
+		n := func(k string) int { v, _ := body[k].(float64); return int(v) }
+		app.NativeQuality(n("w"), n("h"), n("fps"), n("kbps"))
 		return nil, nil
 	case "nscreen/stats":
 		return app.NativeStats(), nil

@@ -46,6 +46,7 @@ type Stream struct {
 	keyReq  atomic.Bool
 	kbpsReq atomic.Int32
 	sizeReq atomic.Uint64 // w<<32 | h
+	presReq atomic.Pointer[preset]
 
 	mu    sync.Mutex
 	stats Stats
@@ -92,6 +93,12 @@ func (s *Stream) KeyFrame() { s.keyReq.Store(true) }
 
 // SetBitrate меняет битрейт на лету.
 func (s *Stream) SetBitrate(kbps int) { s.kbpsReq.Store(int32(kbps)) }
+
+type preset struct{ w, h, fps int }
+
+// SetPreset - пользователь сменил качество во время трансляции: новая рамка
+// размера и частота кадров. Кодер пересоздается, трансляция не прерывается.
+func (s *Stream) SetPreset(maxW, maxH, fps int) { s.presReq.Store(&preset{maxW, maxH, fps}) }
 
 // Resize меняет размер картинки: кодер пересоздается, первый кадр - ключевой.
 func (s *Stream) Resize(w, h int) { s.sizeReq.Store(uint64(even(w))<<32 | uint64(even(h))) }
@@ -244,6 +251,21 @@ func (s *Stream) run(started chan<- error) {
 		}
 		if err := enc.pump(); err != nil {
 			return
+		}
+		if p := s.presReq.Swap(nil); p != nil {
+			if p.fps > 0 {
+				fps = uint32(p.fps)
+				frameDur = time.Second / time.Duration(fps)
+				fd = int64(frameDur / 100)
+			}
+			ow, oh = fit(int(c.size.W), int(c.size.H), p.w, p.h)
+			s.sizeReq.Store(0) // ступень от прошлого качества больше не нужна
+			if build(ow, oh) != nil {
+				return
+			}
+			s.mu.Lock()
+			s.stats.BaseW, s.stats.BaseH = int(ow), int(oh)
+			s.mu.Unlock()
 		}
 		if r := s.sizeReq.Swap(0); r != 0 {
 			if build(uint32(r>>32), uint32(r)) != nil {

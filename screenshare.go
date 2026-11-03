@@ -164,9 +164,10 @@ func (a *App) NativeAnswer(sdp string) error {
 	return s.SetAnswer(sdp)
 }
 
-func (a *App) NativeQuality(kbps int) {
-	if s := nativeSender(); s != nil && kbps > 0 {
-		s.SetMaxBitrate(kbps)
+// NativeQuality - смена качества во время своего захвата: размер, частота, битрейт.
+func (a *App) NativeQuality(w, h, fps, kbps int) {
+	if s := nativeSender(); s != nil {
+		s.SetQuality(w, h, fps, kbps)
 	}
 }
 
