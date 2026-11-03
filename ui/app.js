@@ -2530,6 +2530,7 @@ async function statsTick() {
     const l = [`${n.st.W}×${n.st.H}  ${Math.round(n.fps)} к/с`, `${mbps(n.bits)}  H264 (кодер ${(n.st.kbps / 1000).toFixed(1)} Мбит/с)`,
       `канал до друга: ~${(n.st.target / 1000).toFixed(1)} Мбит/с`, `захват: ${Math.round(n.cap)} к/с`, "кодер: " + (n.st.Encoder || "?") + " (видеокарта)"];
     if (n.st.BaseW && n.st.W < n.st.BaseW) l.push(`узкий канал: разрешение снижено с ${n.st.BaseW}×${n.st.BaseH}`);
+    if (n.st.HDR) l.push(`HDR у источника: переводится в обычный (белый ${Math.round(n.st.WhiteNit)} нит)`);
     if (n.st.Skipped) l.push("пропущено (кодер занят): " + n.st.Skipped);
     l.push("соединение: " + ({ connected: "есть", connecting: "устанавливается", new: "ждет друга", failed: "не удалось", disconnected: "прервано" }[n.st.state] || n.st.state));
     l.push(`пинг: ${st.rtt ?? "?"} мс`);

@@ -40,10 +40,16 @@ type converter struct {
 	out        [nv12Ring]struct{ tex, view com }
 	next       int
 	srcW, srcH uint32 // размер содержимого последнего кадра
+
+	// HDR: кадр FP16 копируется в hdrTex, шейдер пишет обычный RGBA8 в inTex
+	tm     *toneMapper
+	hdrTex com
+	hdrSRV com
+	inUAV  com
 }
 
-func newConverter(d *device, outW, outH, fps uint32) (*converter, error) {
-	c := &converter{d: d, outW: outW, outH: outH, fps: fps}
+func newConverter(d *device, outW, outH, fps uint32, tm *toneMapper) (*converter, error) {
+	c := &converter{d: d, outW: outW, outH: outH, fps: fps, tm: tm}
 	for i := range c.out {
 		t, err := d.texture(outW, outH, fmtNV12, bindRenderTarget)
 		if err != nil {
@@ -61,7 +67,10 @@ func (c *converter) setInput(w, h uint32) error {
 		return nil
 	}
 	c.inView.release()
+	c.inUAV.release()
 	c.inTex.release()
+	c.hdrSRV.release()
+	c.hdrTex.release()
 	c.vp.release()
 	c.enum.release()
 	for i := range c.out {
@@ -79,11 +88,26 @@ func (c *converter) setInput(w, h uint32) error {
 		return err
 	}
 	c.vp = com{vp}
-	t, err := c.d.texture(w, h, fmtBGRA, bindRenderTarget|bindShaderResource)
+	inFmt, inBind := uint32(fmtBGRA), uint32(bindRenderTarget|bindShaderResource)
+	if c.tm != nil {
+		inFmt, inBind = fmtRGBA8, inBind|bindUnorderedAccess
+	}
+	t, err := c.d.texture(w, h, inFmt, inBind)
 	if err != nil {
 		return err
 	}
 	c.inTex = t
+	if c.tm != nil {
+		if c.hdrTex, err = c.d.texture(w, h, fmtRGBA16F, bindShaderResource); err != nil {
+			return err
+		}
+		if c.hdrSRV, err = c.d.srv(c.hdrTex); err != nil {
+			return err
+		}
+		if c.inUAV, err = c.d.uav(c.inTex); err != nil {
+			return err
+		}
+	}
 	inDesc := struct{ FourCC, Dim, Mip, Slice uint32 }{Dim: 1} // D3D11_VPIV_DIMENSION_TEXTURE2D
 	var iv unsafe.Pointer
 	if err := hr(c.d.vdev.call(8, c.inTex.ptr(), c.enum.ptr(), uintptr(unsafe.Pointer(&inDesc)), uintptr(unsafe.Pointer(&iv)))); err != nil { // CreateVideoProcessorInputView
@@ -119,7 +143,12 @@ func (c *converter) put(src com, w, h, texW, texH uint32) error {
 	if err := c.setInput(texW, texH); err != nil {
 		return err
 	}
-	c.d.copyRegion(c.inTex, src, w, h)
+	if c.tm != nil {
+		c.d.copyRegion(c.hdrTex, src, w, h)
+		c.tm.run(c.hdrSRV, c.inUAV, w, h)
+	} else {
+		c.d.copyRegion(c.inTex, src, w, h)
+	}
 	c.srcW, c.srcH = w, h
 	return nil
 }
@@ -150,7 +179,10 @@ func (c *converter) convert() (com, error) {
 
 func (c *converter) close() {
 	c.inView.release()
+	c.inUAV.release()
 	c.inTex.release()
+	c.hdrSRV.release()
+	c.hdrTex.release()
 	for i := range c.out {
 		c.out[i].view.release()
 		c.out[i].tex.release()

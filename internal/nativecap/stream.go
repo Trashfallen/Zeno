@@ -32,7 +32,9 @@ type Stats struct {
 	Captured, Frames int64 // кадров пришло с захвата / ушло из кодера
 	Skipped          int64 // кадров пропущено, потому что кодер был занят
 	Bytes            int64
-	BaseW, BaseH     int // размер картинки без снижения
+	BaseW, BaseH     int     // размер картинки без снижения
+	HDR              bool    // источник в HDR, переводим в обычный диапазон
+	WhiteNit         float64 // белый SDR у отправителя
 }
 
 // Stream - идущий захват. Все методы можно звать из любой горутины.
@@ -48,6 +50,9 @@ type Stream struct {
 	mu    sync.Mutex
 	stats Stats
 }
+
+// forceHDR - для проверок: путь HDR даже на обычном мониторе.
+var forceHDR bool
 
 // MonitorAt - HMONITOR монитора, на котором лежит точка.
 func MonitorAt(x, y int32) uintptr { return monitorAt(x, y) }
@@ -121,7 +126,26 @@ func (s *Stream) run(started chan<- error) {
 		return
 	}
 	defer d.close()
-	c, err := newCapture(d, s.opts.Window, s.opts.Monitor, s.opts.Cursor)
+	// HDR на мониторе источника - захват FP16 и перевод шейдером; шейдер не
+	// собрался - захват как обычно (будет пересвет, но трансляция идет)
+	mon := s.opts.Monitor
+	if s.opts.Window != 0 {
+		mon = monitorOfWindow(s.opts.Window)
+	}
+	var tm *toneMapper
+	hi, _ := hdrInfo(mon)
+	if hi.On || forceHDR {
+		if tm, err = newToneMapper(d, hi.WhiteNit); err != nil {
+			tm = nil
+		}
+	}
+	if tm != nil {
+		defer tm.close()
+		s.mu.Lock()
+		s.stats.HDR, s.stats.WhiteNit = true, tm.white
+		s.mu.Unlock()
+	}
+	c, err := newCapture(d, s.opts.Window, s.opts.Monitor, s.opts.Cursor, tm != nil)
 	if err != nil {
 		started <- err
 		return
@@ -152,7 +176,7 @@ func (s *Stream) run(started chan<- error) {
 			conv = nil
 		}
 		var err error
-		if conv, err = newConverter(d, w, h, fps); err != nil {
+		if conv, err = newConverter(d, w, h, fps, tm); err != nil {
 			return err
 		}
 		if enc, err = newEncoder(d, w, h, fps, kbps, onOut); err != nil {

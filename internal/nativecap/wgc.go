@@ -35,6 +35,7 @@ type capture struct {
 	pool    com // IDirect3D11CaptureFramePool
 	session com // IGraphicsCaptureSession
 	size    sizeInt32
+	format  uintptr // формат кадров: BGRA или FP16 (HDR)
 }
 
 func activationFactory(class string, iid *windows.GUID) (com, error) {
@@ -56,9 +57,12 @@ func activationFactory(class string, iid *windows.GUID) (com, error) {
 }
 
 // newCapture: window != 0 - окно, иначе монитор (HMONITOR).
-func newCapture(d *device, window, monitor uintptr, cursor bool) (*capture, error) {
+func newCapture(d *device, window, monitor uintptr, cursor, hdr bool) (*capture, error) {
 	pRoInitialize.Call(1) // RO_INIT_MULTITHREADED; повторный вызов безвреден
-	c := &capture{d: d}
+	c := &capture{d: d, format: pixelBGRA}
+	if hdr {
+		c.format = pixelRGBA16F
+	}
 	interop, err := activationFactory("Windows.Graphics.Capture.GraphicsCaptureItem", &iidIGraphicsCaptureItemInterop)
 	if err != nil {
 		return nil, err
@@ -92,7 +96,7 @@ func newCapture(d *device, window, monitor uintptr, cursor bool) (*capture, erro
 		return nil, err
 	}
 	var pool unsafe.Pointer
-	err = hr(statics.call(6, c.rtDev.ptr(), pixelBGRA, 2, c.size.packed(), uintptr(unsafe.Pointer(&pool)))) // CreateFreeThreaded
+	err = hr(statics.call(6, c.rtDev.ptr(), c.format, 2, c.size.packed(), uintptr(unsafe.Pointer(&pool)))) // CreateFreeThreaded
 	statics.release()
 	if err != nil {
 		c.close()
@@ -166,7 +170,7 @@ func (c *capture) grab(onFrame func(tex com, w, h, texW, texH uint32, t int64)) 
 		// источник поменял размер - пул под новый размер
 		if cs.W > 0 && cs.H > 0 && (cs.W != c.size.W || cs.H != c.size.H) {
 			c.size = cs
-			c.pool.call(6, c.rtDev.ptr(), pixelBGRA, 2, cs.packed()) // Recreate
+			c.pool.call(6, c.rtDev.ptr(), c.format, 2, cs.packed()) // Recreate
 		}
 	}
 }
