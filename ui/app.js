@@ -1561,8 +1561,50 @@ async function beginScreen(id) {
   renderAll();
 }
 
-async function tuneScreen() {
+// Удержание частоты кадров в режиме «Плавность»: если захват дает полную
+// частоту, а наружу уходит меньше (кодеру не хватает ресурсов или канала), шаг
+// за шагом снижаем разрешение, но не ниже 720p. Когда долго все ровно -
+// возвращаем ступень; если после возврата снова просело, следующий возврат ждем дольше.
+const FPS_STEPS = [1, 1.25, 1.5, 2];
+const keeper = { step: 0, low: 0, good: 0, upWait: 20, upAt: 0, minH: 0, since: 0 };
+
+function keepFps(st) {
+  if (!S.screen || S.media.screenMode !== "motion") return;
+  const o = st.out.screen;
+  // первые секунды кодер и канал разгоняются - кадров меньше и без нехватки ресурсов
+  if (!o || o.framesPerSecond == null || Date.now() - keeper.since < 8000) return;
+  const want = (SCREEN_PRESETS[S.media.screenPreset] || SCREEN_PRESETS["1080p60"]).fps;
+  const src = st.src && st.src.screen;
+  const cap = src && src.framesPerSecond != null ? src.framesPerSecond : want;
+  // захват сам дает мало кадров (картинка стоит или окно так рисуется) - разрешение не поможет
+  if (cap < want * 0.85) {
+    keeper.low = keeper.good = 0;
+    return;
+  }
+  if (o.framesPerSecond < want * 0.85) {
+    keeper.good = 0;
+    const next = FPS_STEPS[keeper.step + 1];
+    if (++keeper.low >= 3 && next && keeper.minH / next >= 719) {
+      if (Date.now() - keeper.upAt < 30000) keeper.upWait = Math.min(keeper.upWait * 2, 240);
+      keeper.step++;
+      keeper.low = 0;
+      tuneScreen(true).catch(() => {});
+    }
+    return;
+  }
+  keeper.low = 0;
+  if (keeper.step > 0 && o.framesPerSecond >= want * 0.95 && ++keeper.good >= keeper.upWait) {
+    keeper.step--;
+    keeper.good = 0;
+    keeper.upAt = Date.now();
+    tuneScreen(true).catch(() => {});
+  }
+}
+
+// tuneScreen(keepStep): keepStep - вызов от удержания кадров, ступень не сбрасывать
+async function tuneScreen(keepStep) {
   if (!S.screen || !S.call) return;
+  if (keepStep !== true) Object.assign(keeper, { step: 0, low: 0, good: 0, upWait: 20, upAt: 0, since: Date.now() });
   const p = peerOf(S.call.id);
   const pr = SCREEN_PRESETS[S.media.screenPreset] || SCREEN_PRESETS["1080p60"];
   const v = S.screen.getVideoTracks()[0];
@@ -1570,7 +1612,9 @@ async function tuneScreen() {
   v.contentHint = motion ? "motion" : "detail";
   try { await v.applyConstraints({ width: { max: pr.w }, height: { max: pr.h }, frameRate: { ideal: pr.fps, max: pr.fps } }); } catch (e) { /* источник не умеет */ }
   const st = v.getSettings();
-  const scale = Math.max(1, (st.width || pr.w) / pr.w, (st.height || pr.h) / pr.h);
+  const base = Math.max(1, (st.width || pr.w) / pr.w, (st.height || pr.h) / pr.h);
+  keeper.minH = (st.height || pr.h) / base;
+  const scale = base * (motion ? FPS_STEPS[keeper.step] : 1);
   // для игр - держим и кадры, и разрешение: при нехватке канала падает только
   // четкость. balanced при любом упоре (разгон канала, скачок времени кодирования)
   // резал до 25-30 к/с и снижал разрешение, maintain-framerate скатывался до 320x180
@@ -2064,6 +2108,7 @@ async function statsTick() {
   S.rtt = st.rtt;
   S.route = st.route;
   renderVoicePanel();
+  keepFps(st);
   if (!S.showStats) return;
   const lines = (s, out) => {
     if (!s) return "нет данных";
@@ -2074,6 +2119,7 @@ async function statsTick() {
     if (out) {
       const src = st.src && st.src.screen;
       if (src && src.framesPerSecond != null) l.push(`захват: ${Math.round(src.framesPerSecond)} к/с`);
+      if (keeper.step > 0) l.push(`держу частоту: разрешение снижено (${keeper.step} из ${FPS_STEPS.length - 1})`);
       const ri = st.remoteIn[s.id];
       if (ri && ri.fractionLost != null) l.push(`потери у друга: ${(ri.fractionLost * 100).toFixed(1)}%`);
       if (st.availOut) l.push(`канал наружу: ${mbps(st.availOut)}`);

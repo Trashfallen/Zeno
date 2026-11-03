@@ -35,6 +35,7 @@ func (a *App) SetCaptureActive(active bool) {
 		b.stop = nil
 	}
 	if !active {
+		boostWebview(false)
 		return
 	}
 	stop := make(chan struct{})
@@ -45,6 +46,7 @@ func (a *App) SetCaptureActive(active bool) {
 		start := time.Now()
 		for {
 			hideCaptureBars()
+			boostWebview(true)
 			wait := time.Second
 			if time.Since(start) < 15*time.Second {
 				wait = 150 * time.Millisecond
@@ -58,6 +60,47 @@ func (a *App) SetCaptureActive(active bool) {
 			}
 		}
 	}()
+}
+
+// boostWebview: на время трансляции процессы движка (захват, кодер, отправка)
+// получают повышенный приоритет процессора и высокий приоритет видеокарты, как
+// у OBS. Иначе игра на весь экран забирает ресурсы и трансляция падает до
+// 25-30 к/с, хотя без игры тот же кодер дает 60 к/с на 1440p.
+var (
+	boostMu  sync.Mutex
+	boosted  = map[uint32]bool{}
+	procGPUP = windows.NewLazySystemDLL("gdi32.dll").NewProc("D3DKMTSetProcessSchedulingPriorityClass")
+)
+
+func boostWebview(on bool) {
+	boostMu.Lock()
+	defer boostMu.Unlock()
+	const aboveNormal, normal = 0x00008000, 0x00000020
+	const gpuNormal, gpuHigh = 2, 4 // D3DKMT_SCHEDULINGPRIORITYCLASS
+	set := func(pid uint32, cpu uint32, gpu uintptr) bool {
+		h, err := windows.OpenProcess(windows.PROCESS_SET_INFORMATION|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+		if err != nil {
+			return false
+		}
+		defer windows.CloseHandle(h)
+		ok := windows.SetPriorityClass(h, cpu) == nil
+		if procGPUP.Find() == nil {
+			procGPUP.Call(uintptr(h), gpu)
+		}
+		return ok
+	}
+	if !on {
+		for pid := range boosted {
+			set(pid, normal, gpuNormal)
+		}
+		boosted = map[uint32]bool{}
+		return
+	}
+	for pid := range webviewPIDs() {
+		if !boosted[pid] && set(pid, aboveNormal, gpuHigh) {
+			boosted[pid] = true
+		}
+	}
 }
 
 // webviewPIDs - процессы WebView2, запущенные нашей программой.
