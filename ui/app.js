@@ -224,7 +224,7 @@ function renderSide() {
     const n = S.unread.get(f.id) || 0;
     const inCall = S.call && S.call.id === f.id;
     const sub = inCall
-      ? h("div", { class: "dm-sub in-call" }, S.call.state === "active" ? "в звонке" : "вызов…")
+      ? h("div", { class: "dm-sub in-call" }, S.call.state === "active" ? "в звонке" : S.call.state === "reconnecting" ? "переподключение…" : "вызов…")
       : h("div", { class: "dm-sub" }, statusText(st));
     return h("button", {
       class: "dm" + (S.view === "dm" && S.sel === f.id ? " active" : "") + (n ? " unread" : ""),
@@ -258,7 +258,7 @@ function renderVoicePanel() {
   const unstable = peerState(c.id) === "unstable";
   const title = $("#vpTitle");
   title.textContent = c.state === "active" ? (unstable ? "Связь нестабильна" : "Голосовая связь подключена")
-    : c.state === "incoming" ? "Входящий звонок" : "Вызов…";
+    : c.state === "incoming" ? "Входящий звонок" : c.state === "reconnecting" ? "Переподключение…" : "Вызов…";
   title.classList.toggle("warn", unstable || c.state !== "active");
   const bits = [f ? f.nick : ""];
   if (c.state === "active") {
@@ -291,7 +291,7 @@ async function refreshUpdate() {
 }
 
 $("#updateBtn").onclick = async () => {
-  if (S.call && !confirm("Обновление перезапустит Zeno и завершит звонок. Продолжить?")) return;
+  if (S.call && !confirm("Обновление перезапустит Zeno. Звонок прервется на несколько секунд и восстановится сам, если у друга Zeno 0.5.4 или новее. Продолжить?")) return;
   try {
     await api("update/install");
     toast("Скачиваю обновление, Zeno перезапустится сам");
@@ -604,6 +604,7 @@ function onPeerState(id, st) {
     if (!p.helloSent) {
       p.helloSent = true;
       p.send({ k: "hello", nick: S.me.nick, color: S.me.color, v: S.version });
+      if (S.call && S.call.id === id && S.call.state === "reconnecting") p.send({ k: "resume" });
       lanAnnounce(id);
       sfx.play("connect");
       toast(`Соединено с ${f.nick}`, "ok");
@@ -623,8 +624,10 @@ function onPeerLost(id, why) {
     p.autoAt = 0;
   }
   S.remote.delete(id);
-  if (S.call && S.call.id === id) endCall("Соединение потеряно");
-  if (f) toast(`Соединение с ${f.nick} потеряно, переподключаюсь…`, "err");
+  const inCall = S.call && S.call.id === id && (S.call.state === "active" || S.call.state === "reconnecting");
+  if (inCall) callLost();
+  else if (S.call && S.call.id === id) endCall("Соединение потеряно");
+  if (f && !inCall) toast(`Соединение с ${f.nick} потеряно, переподключаюсь…`, "err");
   setTimeout(() => autoReconnect(id), 1500);
   renderAll();
 }
@@ -698,7 +701,21 @@ async function onPeerMessage(id, m) {
       if (S.call && S.call.id === id && S.call.state === "incoming") endCall("Пропущенный звонок");
       break;
     case "hangup":
-      if (S.call && S.call.id === id) endCall();
+      if (S.call && S.call.id === id) endCall(S.call.state === "reconnecting" ? "Звонок завершен: у друга он уже закончился" : undefined);
+      break;
+    case "resume": // друг восстановил связь и хочет продолжить звонок
+      if (S.call && S.call.id === id && (S.call.state === "reconnecting" || S.call.state === "active")) {
+        p.send({ k: "resume-ok" });
+        await resumeCall();
+      } else if (!S.call && recentCall(id)) { // это мы перезапускались (обновление) посреди звонка
+        p.send({ k: "resume-ok" });
+        await rejoinCall(id);
+      } else {
+        p.send({ k: "hangup" });
+      }
+      break;
+    case "resume-ok":
+      if (S.call && S.call.id === id && S.call.state === "reconnecting") await resumeCall();
       break;
     case "nscreen-offer":
       if (S.call && S.call.id === id && typeof m.sdp === "string") await acceptNative(id, m.sdp);
@@ -1215,7 +1232,7 @@ function hangup() {
 $("#vpHang").onclick = hangup;
 $("#sbHang").onclick = hangup;
 
-async function activateCall() {
+async function activateCall(resumed) {
   const c = S.call;
   clearTimeout(c.timer);
   sfx.stopRing();
@@ -1238,13 +1255,108 @@ async function activateCall() {
   await tuneSenders();
   sendState();
   syncPTT();
-  addSys(c.id, "Звонок");
+  markCall(c.id);
+  addSys(c.id, resumed ? "Звонок восстановлен" : "Звонок");
   renderAll();
+}
+
+// ---------- восстановление звонка ----------
+// Обрыв связи (сеть моргнула, друг перезапустил Zeno для обновления) звонок
+// не завершает: до 90 с он ждет в состоянии «переподключение», микрофон и
+// трансляция не останавливаются. Когда соединение вернулось, стороны
+// договариваются (resume / resume-ok), и дорожки отдаются заново. Метка
+// звонка в localStorage дает перезапущенной стороне понять, что она была в
+// звонке, и войти обратно без вызова и гудков.
+
+const CALL_MARK = "zeno.call";
+const RESUME_WAIT = 90000;
+
+function markCall(id) {
+  try { localStorage.setItem(CALL_MARK, JSON.stringify({ id, at: Date.now() })); } catch (e) { /* без метки - просто не вернемся сами */ }
+}
+
+function clearCallMark() {
+  try { localStorage.removeItem(CALL_MARK); } catch (e) { /* нечего чистить */ }
+}
+
+function recentCall(id) {
+  try {
+    const m = JSON.parse(localStorage.getItem(CALL_MARK) || "null");
+    return !!m && m.id === id && Date.now() - m.at < RESUME_WAIT;
+  } catch (e) {
+    return false;
+  }
+}
+
+function callLost() {
+  const c = S.call;
+  if (c.state !== "reconnecting") {
+    c.state = "reconnecting";
+    toast("Связь со звонком прервалась, восстанавливаю…", "err");
+  }
+  // свой захват шел отдельным соединением к другу - после восстановления запустим заново
+  if (S.native) {
+    S.native = false;
+    S.nsStats = null;
+    c.resumeNative = true;
+    api("nscreen/stop").catch(() => {});
+  }
+  closeNativeIn();
+  detachRemote();
+  clearTimeout(c.timer);
+  c.timer = setTimeout(() => {
+    if (S.call === c && c.state === "reconnecting") endCall("Звонок прервался: связь не восстановилась");
+  }, RESUME_WAIT);
+  renderAll();
+}
+
+async function resumeCall() {
+  const c = S.call;
+  const p = peerOf(c.id);
+  if (!p) return;
+  clearTimeout(c.timer);
+  const was = c.state;
+  c.state = "active";
+  try {
+    if (!mic.live) {
+      await mic.start(S.media);
+      mic.setMuted(S.muted || S.deaf);
+    }
+    if (S.call !== c) return;
+    await p.setTrack("mic", mic.track);
+  } catch (e) {
+    toast("Микрофон недоступен: " + e.message, "err");
+  }
+  if (S.cam) await p.setTrack("cam", S.cam.getVideoTracks()[0]).catch(() => {});
+  if (S.screen) {
+    S.native = false;
+    if (c.resumeNative && S.nativeId) S.native = await startNative(S.nativeId).catch(() => false);
+    c.resumeNative = false;
+    if (S.screen && !S.native) await p.setTrack("screen", S.screen.getVideoTracks()[0]).catch(() => {});
+    await applyScreenAudio().catch(() => {});
+  }
+  attachRemote(c.id);
+  await tuneSenders().catch(() => {});
+  sendState();
+  syncPTT();
+  if (was === "reconnecting") {
+    sfx.play("join");
+    toast("Звонок восстановлен", "ok");
+  }
+  renderAll();
+}
+
+// rejoinCall: мы перезапустились посреди звонка, друг ждет - входим обратно
+async function rejoinCall(id) {
+  S.call = { id, state: "incoming", video: false, started: 0 };
+  await activateCall(true);
+  if (S.view !== "dm" || S.sel !== id) openDM(id);
 }
 
 function endCall(reason) {
   const c = S.call;
   if (!c) return;
+  clearCallMark();
   clearTimeout(c.timer);
   sfx.stopRing();
   ringIncoming(false);
@@ -1583,6 +1695,7 @@ async function beginScreen(id) {
   v.onended = () => stopScreen();
   const p = peerOf(S.call.id);
   S.native = false;
+  S.nativeId = wantNative ? id : null;
   if (wantNative) {
     S.native = await startNative(id).catch((e) => {
       toast("Захват через видеокарту не запустился, транслирую через браузер: " + e.message, "err");
@@ -2134,7 +2247,9 @@ function renderStage() {
     else tile.append(avatar(person, 80));
     const mutedNow = me ? (S.muted || S.deaf) : (c.state === "active" && (rs.mic === false || rs.deaf));
     tile.append(h("div", { class: "tile-label" }, mutedNow ? h("span", { html: icon(rs.deaf && !me ? "headOff" : "micOff", 14) }) : null, person.nick));
-    if (!me && c.state === "outgoing") tile.append(h("div", { class: "waiting" }, "Вызов…"));
+    if (!me && (c.state === "outgoing" || c.state === "reconnecting")) {
+      tile.append(h("div", { class: "waiting" }, c.state === "outgoing" ? "Вызов…" : "Переподключение…"));
+    }
     if (!me) {
       const v = vol(f.id);
       if (active && (v.voiceMuted || v.voice !== 100)) tile.append(h("span", { class: "vol-badge" + (v.voiceMuted ? " muted" : "") }, v.voiceMuted ? "звук выкл" : v.voice + "%"));
@@ -2484,6 +2599,7 @@ async function statsTick() {
   S.rtt = st.rtt;
   S.route = st.route;
   renderVoicePanel();
+  markCall(c.id);
   keepFps(st);
   await nativeTick();
   if (!S.showStats) return;
@@ -2981,7 +3097,7 @@ function secApp() {
   };
   updBtn.onclick = async () => {
     if (S.update && S.update.available) {
-      if (S.call && !confirm("Обновление перезапустит Zeno и завершит звонок. Продолжить?")) return;
+      if (S.call && !confirm("Обновление перезапустит Zeno. Звонок прервется на несколько секунд и восстановится сам, если у друга Zeno 0.5.4 или новее. Продолжить?")) return;
       updBtn.disabled = true;
       status.textContent = "Скачиваю обновление, Zeno перезапустится сам…";
       try { await api("update/install"); } catch (e) { status.textContent = e.message; updBtn.disabled = false; }
