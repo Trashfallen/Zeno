@@ -32,6 +32,7 @@ type Stats struct {
 	Captured, Frames int64 // кадров пришло с захвата / ушло из кодера
 	Skipped          int64 // кадров пропущено, потому что кодер был занят
 	Bytes            int64
+	BaseW, BaseH     int // размер картинки без снижения
 }
 
 // Stream - идущий захват. Все методы можно звать из любой горутины.
@@ -42,6 +43,7 @@ type Stream struct {
 	done    chan struct{}
 	keyReq  atomic.Bool
 	kbpsReq atomic.Int32
+	sizeReq atomic.Uint64 // w<<32 | h
 
 	mu    sync.Mutex
 	stats Stats
@@ -86,6 +88,9 @@ func (s *Stream) KeyFrame() { s.keyReq.Store(true) }
 // SetBitrate меняет битрейт на лету.
 func (s *Stream) SetBitrate(kbps int) { s.kbpsReq.Store(int32(kbps)) }
 
+// Resize меняет размер картинки: кодер пересоздается, первый кадр - ключевой.
+func (s *Stream) Resize(w, h int) { s.sizeReq.Store(uint64(even(w))<<32 | uint64(even(h))) }
+
 func (s *Stream) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,27 +129,54 @@ func (s *Stream) run(started chan<- error) {
 	defer c.close()
 	ow, oh := fit(int(c.size.W), int(c.size.H), s.opts.W, s.opts.H)
 	fps := uint32(s.opts.FPS)
-	conv, err := newConverter(d, ow, oh, fps)
-	if err != nil {
-		started <- err
-		return
-	}
-	defer conv.close()
 	frameDur := time.Second / time.Duration(fps)
-	enc, err := newEncoder(d, ow, oh, fps, uint32(s.opts.Kbps), func(data []byte, key bool, ts int64) {
+	kbps := uint32(s.opts.Kbps)
+	onOut := func(data []byte, key bool, ts int64) {
 		s.mu.Lock()
 		s.stats.Frames++
 		s.stats.Bytes += int64(len(data))
 		s.mu.Unlock()
 		s.out(Frame{Data: data, Key: key, TS: time.Duration(ts) * 100})
-	})
-	if err != nil {
+	}
+	// build (пере)создает видеопроцессор и кодер под размер картинки: при узком
+	// канале отправитель просит разрешение пониже, чтобы не было квадратов
+	var conv *converter
+	var enc *encoder
+	build := func(w, h uint32) error {
+		if enc != nil {
+			enc.close()
+			enc = nil
+		}
+		if conv != nil {
+			conv.close()
+			conv = nil
+		}
+		var err error
+		if conv, err = newConverter(d, w, h, fps); err != nil {
+			return err
+		}
+		if enc, err = newEncoder(d, w, h, fps, kbps, onOut); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.stats.Encoder, s.stats.W, s.stats.H = enc.Name, int(w), int(h)
+		s.mu.Unlock()
+		return nil
+	}
+	defer func() {
+		if enc != nil {
+			enc.close()
+		}
+		if conv != nil {
+			conv.close()
+		}
+	}()
+	if err := build(ow, oh); err != nil {
 		started <- err
 		return
 	}
-	defer enc.close()
 	s.mu.Lock()
-	s.stats.Encoder, s.stats.W, s.stats.H = enc.Name, int(ow), int(oh)
+	s.stats.BaseW, s.stats.BaseH = int(ow), int(oh)
 	s.mu.Unlock()
 	started <- nil
 
@@ -189,8 +221,14 @@ func (s *Stream) run(started chan<- error) {
 		if err := enc.pump(); err != nil {
 			return
 		}
+		if r := s.sizeReq.Swap(0); r != 0 {
+			if build(uint32(r>>32), uint32(r)) != nil {
+				return
+			}
+		}
 		if k := s.kbpsReq.Swap(0); k > 0 {
-			enc.setBitrate(uint32(k))
+			kbps = uint32(k)
+			enc.setBitrate(kbps)
 		}
 		now := time.Now()
 		repeat := !fresh && !lastEnc.IsZero() && now.Sub(lastEnc) > 500*time.Millisecond

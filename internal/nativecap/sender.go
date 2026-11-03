@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
@@ -25,19 +27,22 @@ type Sender struct {
 	stream  *Stream
 	maxKbps int
 
+	fps int
+
 	mu      sync.Mutex
-	kbps    int
+	kbps    int // битрейт кодера сейчас
+	target  int // оценка канала (GCC), кбит/с
 	rtpBase uint32
 	state   string
-	cleanAt time.Time // когда потери последний раз были выше нормы
 	closed  bool
 }
 
 // SenderStats - для статистики в окне трансляции.
 type SenderStats struct {
 	Stats
-	Kbps  int    `json:"kbps"`  // текущий битрейт кодера
-	State string `json:"state"` // состояние соединения
+	Kbps   int    `json:"kbps"`   // текущий битрейт кодера
+	Target int    `json:"target"` // оценка канала до друга
+	State  string `json:"state"`  // состояние соединения
 }
 
 // ICEServer - STUN/TURN, как в настройках страницы.
@@ -49,7 +54,7 @@ type ICEServer struct {
 // NewSender запускает захват и готовит предложение для браузера друга.
 func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	m := &webrtc.MediaEngine{}
-	fb := []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"}, {Type: "goog-remb"}}
+	fb := []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"}, {Type: "transport-cc"}}
 	for i, fmtp := range []string{
 		"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f",
 		"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
@@ -61,7 +66,30 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 			return nil, "", err
 		}
 	}
+	// Оценка канала как в браузере (GCC по задержкам и потерям) и пейсер:
+	// пакеты кадра уходят равномерно каждые 5 мс, а не пачкой. Без этого
+	// кадр 1440p пачкой в сотню пакетов переполнял очередь у друга - потери 10-15%.
 	ir := &interceptor.Registry{}
+	o.Kbps = max(o.Kbps, 1000)
+	startKbps := min(o.Kbps, 8000)
+	estCh := make(chan cc.BandwidthEstimator, 1)
+	ccf, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+		return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(startKbps*1000),
+			gcc.SendSideBWEMinBitrate(minKbps*1000), gcc.SendSideBWEMaxBitrate(maxKbps*1000))
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	ccf.OnNewPeerConnection(func(_ string, e cc.BandwidthEstimator) {
+		select {
+		case estCh <- e:
+		default:
+		}
+	})
+	ir.Add(ccf)
+	if err := webrtc.ConfigureTWCCHeaderExtensionSender(m, ir); err != nil {
+		return nil, "", err
+	}
 	if err := webrtc.RegisterDefaultInterceptors(m, ir); err != nil {
 		return nil, "", err
 	}
@@ -78,7 +106,10 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	s := &Sender{pc: pc, maxKbps: o.Kbps, kbps: o.Kbps, state: "new"}
+	s := &Sender{pc: pc, maxKbps: o.Kbps, kbps: startKbps, target: startKbps, fps: o.FPS, state: "new"}
+	if s.fps <= 0 {
+		s.fps = 60
+	}
 	s.pkt = rtp.NewPacketizer(1200, 0, 0, &codecs.H264Payloader{}, rtp.NewRandomSequencer(), 90000)
 	s.rtpBase = uint32(time.Now().UnixNano())
 	fail := func(err error) (*Sender, string, error) {
@@ -103,11 +134,19 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 		}
 	})
 
-	s.stream, err = Start(o, s.write)
+	so := o
+	so.Kbps = startKbps
+	s.stream, err = Start(so, s.write)
 	if err != nil {
 		return fail(err)
 	}
 	go s.readRTCP(tr.Sender())
+	select {
+	case est := <-estCh:
+		est.OnTargetBitrateChange(s.onTarget)
+	default:
+	}
+	go s.ladder()
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
@@ -136,7 +175,8 @@ func (s *Sender) write(f Frame) {
 	}
 }
 
-// readRTCP: запросы ключевого кадра и отчеты о потерях от браузера друга.
+// readRTCP: запросы ключевого кадра от браузера друга (потери, подключение).
+// Отчеты о потерях и задержках разбирает GCC.
 func (s *Sender) readRTCP(rs *webrtc.RTPSender) {
 	for {
 		pkts, _, err := rs.ReadRTCP()
@@ -144,36 +184,85 @@ func (s *Sender) readRTCP(rs *webrtc.RTPSender) {
 			return
 		}
 		for _, p := range pkts {
-			switch r := p.(type) {
+			switch p.(type) {
 			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
 				s.stream.KeyFrame()
-			case *rtcp.ReceiverReport:
-				for _, rep := range r.Reports {
-					s.adapt(float64(rep.FractionLost) / 256)
-				}
 			}
 		}
 	}
 }
 
-// adapt - простая подстройка битрейта по потерям: заметные потери - снижаем
-// на 15%, чисто 5 секунд - прибавляем 8%, но не выше выбранного качества.
-func (s *Sender) adapt(lost float64) {
+const (
+	minKbps = 800
+	maxKbps = 25000
+)
+
+// onTarget - новая оценка канала: битрейт кодера = оценка, но не выше выбранного качества.
+func (s *Sender) onTarget(bps int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
-	k := s.kbps
-	switch {
-	case lost > 0.05:
-		k = max(s.maxKbps/5, k*85/100)
-		s.cleanAt = now
-	case lost < 0.01 && now.Sub(s.cleanAt) > 5*time.Second:
-		k = min(s.maxKbps, k*108/100+100)
-		s.cleanAt = now
-	}
-	if k != s.kbps {
+	s.target = bps / 1000
+	k := max(minKbps, min(s.target, s.maxKbps))
+	// мелкие колебания оценки кодеру не передаем, но до потолка качества доходим
+	if d := k - s.kbps; d > s.kbps/20 || -d > s.kbps/20 || (k == s.maxKbps && d != 0) {
 		s.kbps = k
 		s.stream.SetBitrate(k)
+	}
+}
+
+// Ступени разрешения от исходного: при узком канале лучше меньше пикселей,
+// чем квадраты. Мера - бит на пиксель кадра: ниже 0,04 картинка сыплется.
+var ladderSteps = []float64{1, 0.75, 0.6, 0.5}
+
+const (
+	bppLow    = 0.04 // ниже - снижаем разрешение (3 с подряд)
+	bppHigh   = 0.07 // на ступень выше хватает - возвращаем (10 с подряд)
+	ladderMin = 480  // ниже этой высоты не опускаемся
+)
+
+func (s *Sender) ladder() {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	step, low, high := 0, 0, 0
+	for {
+		select {
+		case <-s.stream.Done():
+			return
+		case <-t.C:
+		}
+		st := s.stream.Stats()
+		s.mu.Lock()
+		kbps := s.kbps
+		s.mu.Unlock()
+		if st.BaseW == 0 {
+			continue
+		}
+		bpp := func(k float64) float64 {
+			w, h := float64(st.BaseW)*k, float64(st.BaseH)*k
+			return float64(kbps) * 1000 / (w * h * float64(s.fps))
+		}
+		if bpp(ladderSteps[step]) < bppLow {
+			low++
+		} else {
+			low = 0
+		}
+		if step > 0 && bpp(ladderSteps[step-1]) > bppHigh {
+			high++
+		} else {
+			high = 0
+		}
+		next := step
+		switch {
+		case low >= 3 && step+1 < len(ladderSteps) && float64(st.BaseH)*ladderSteps[step+1] >= ladderMin:
+			next = step + 1
+		case high >= 10:
+			next = step - 1
+		}
+		if next != step {
+			step, low, high = next, 0, 0
+			k := ladderSteps[step]
+			s.stream.Resize(int(float64(st.BaseW)*k), int(float64(st.BaseH)*k))
+		}
 	}
 }
 
@@ -190,14 +279,14 @@ func (s *Sender) SetMaxBitrate(kbps int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.maxKbps = kbps
-	s.kbps = min(s.kbps, kbps)
+	s.kbps = max(minKbps, min(s.target, kbps))
 	s.stream.SetBitrate(s.kbps)
 }
 
 func (s *Sender) Stats() SenderStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := SenderStats{Kbps: s.kbps, State: s.state}
+	out := SenderStats{Kbps: s.kbps, Target: s.target, State: s.state}
 	if s.stream != nil {
 		out.Stats = s.stream.Stats()
 	}
