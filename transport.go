@@ -160,10 +160,12 @@ type ntfyT struct {
 	wake    chan struct{}
 	ready   atomic.Bool
 	closed  atomic.Bool
-	mu      sync.Mutex
-	names   map[string]string // имя темы ntfy -> наша тема
-	since   string
-	cancel  context.CancelFunc
+	// limitUntil: до какого времени (unix) отправка упирается в дневной лимит
+	limitUntil atomic.Int64
+	mu         sync.Mutex
+	names      map[string]string // имя темы ntfy -> наша тема
+	since      string
+	cancel     context.CancelFunc
 }
 
 var ntfyClient = &http.Client{Timeout: 0}
@@ -301,7 +303,40 @@ func (n *ntfyT) stream(ctx context.Context, topics, since string) error {
 	return fmt.Errorf("сервер закрыл поток")
 }
 
+// Limited: дневной лимит отправки ntfy.sh исчерпан (250 сообщений на адрес) -
+// до сброса не отправляем, чтобы не считать его рабочим. Принимать он не мешает.
+func (n *ntfyT) Limited() bool {
+	until := n.limitUntil.Load()
+	return until != 0 && time.Now().Unix() < until
+}
+
+// onLimit: ntfy ответил 429 - узнаем, когда сбросится лимит (иначе ждем час).
+func (n *ntfyT) onLimit() {
+	until := time.Now().Add(time.Hour).Unix()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", n.base+"/v1/account", nil)
+	if resp, err := ntfyClient.Do(req); err == nil {
+		var acc struct {
+			Stats struct {
+				ResetAt int64 `json:"reset_at"`
+			} `json:"stats"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&acc) == nil && acc.Stats.ResetAt > time.Now().Unix() {
+			until = acc.Stats.ResetAt
+		}
+		resp.Body.Close()
+	}
+	if n.limitUntil.Swap(until) < time.Now().Unix() {
+		logf("ntfy %s: дневной лимит отправки исчерпан (общий на адрес, через VPN - на всех), до %s не отправляю",
+			n.base, time.Unix(until, 0).Format("15:04"))
+	}
+}
+
 func (n *ntfyT) Publish(topic string, payload []byte, _ bool) error {
+	if n.Limited() {
+		return fmt.Errorf("%s: дневной лимит отправки исчерпан", n.base)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", n.base+"/"+ntfyName(topic), strings.NewReader(base64.StdEncoding.EncodeToString(payload)))
@@ -310,6 +345,9 @@ func (n *ntfyT) Publish(topic string, payload []byte, _ bool) error {
 		return err
 	}
 	resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		go n.onLimit()
+	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("%s: ответ %s", n.base, resp.Status)
 	}

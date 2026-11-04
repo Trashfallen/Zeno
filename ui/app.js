@@ -919,6 +919,7 @@ function onPeerState(id, st) {
   if (p && st !== "connected" && st !== "unstable") p.helloSent = false;
   if (st === "connected" && p && !p.connectedAt) {
     p.connectedAt = Date.now();
+    p.helloAt = p.helloGap = 0; // при следующем обрыве снова зовем часто
     p.autoAt = 0; // соединились - следующая попытка (после обрыва) может идти сразу
   }
   if (p && st === "offline") p.connectedAt = 0;
@@ -1116,12 +1117,23 @@ function autoHello(id, reply = false) {
 
 let lastHelloAll = 0;
 
+// Пока друга нет на связи, зовем его с растущей паузой: 30 с, 1, 2, 4, 5 минут.
+// Каждый зов уходит через все серверы, а у ntfy.sh лимит 250 сообщений в сутки
+// на адрес (через общий VPN - на всех): зов раз в 30 с съедал его за час, и
+// после этого связь пропадала до утра. Соединились - пауза снова с нуля.
+const HELLO_FIRST = 30000;
+const HELLO_MAX = 5 * 60000;
+
 function autoHelloAll() {
   if (Date.now() - lastHelloAll < 3000) return; // серверы подключаются пачкой - не звать друзей на каждый
   lastHelloAll = Date.now();
   for (const f of S.friends) {
     const p = getPeer(f.id);
-    if (!p.connected && !autoBusy(p)) autoHello(f.id);
+    if (p.connected || autoBusy(p)) continue;
+    if (p.helloAt && Date.now() - p.helloAt < (p.helloGap || 0)) continue;
+    p.helloAt = Date.now();
+    p.helloGap = p.helloGap ? Math.min(p.helloGap * 2, HELLO_MAX) : HELLO_FIRST;
+    autoHello(f.id);
   }
 }
 

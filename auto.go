@@ -222,6 +222,9 @@ func (au *Auto) Send(to, kind, data string, reply bool) error {
 	payload := p.aead.Seal(nonce, nonce, plain, []byte(p.topic))
 	sent := 0
 	for _, t := range ts {
+		if l, ok := t.(interface{ Limited() bool }); ok && l.Limited() {
+			continue // ntfy с исчерпанным дневным лимитом - не считаем, что отправили
+		}
 		if t.Ready() {
 			go t.Publish(p.topic, payload, false)
 			sent++
