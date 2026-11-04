@@ -129,7 +129,12 @@ func main() {
 	if exe := exePath(); appVersion != "dev" && exe != "" && os.Getenv("ZENO_HOME") == "" {
 		go ensureStartMenu(exe)
 	}
-	app.updater.startBackground(func() bool { return app.cfg.Bool("check_updates") })
+	app.updater.startBackground(func() bool { return app.cfg.Bool("check_updates") }, func() {
+		if app.cfg.Bool("update_on_start") {
+			logf("Новая версия при запуске - ставлю сразу")
+			app.installUpdate()
+		}
+	})
 	go app.ptt.run()
 	if acc := app.profiles.Current(); acc != nil {
 		app.auto.Start(acc) // друзья найдут нас, даже пока окно спрятано

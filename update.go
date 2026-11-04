@@ -112,13 +112,20 @@ func newerVersion(tag, cur string) bool {
 	return false
 }
 
-func (u *Updater) startBackground(enabled func() bool) {
+// startBackground: первая проверка сразу при запуске, дальше раз в 6 часов.
+// Если при запуске нашлась новая версия, вызывается onStart (поставить сразу).
+// Позже найденная только показывает кнопку: обновление посреди звонка оборвало бы его.
+func (u *Updater) startBackground(enabled func() bool, onStart func()) {
 	go func() {
-		time.Sleep(5 * time.Second)
+		first := true
 		for {
 			if enabled() {
 				u.Check()
+				if first && onStart != nil && u.State().Available {
+					onStart()
+				}
 			}
+			first = false
 			time.Sleep(6 * time.Hour)
 		}
 	}()

@@ -158,6 +158,7 @@ function showApp() {
     setInterval(fastTick, 100);
     setInterval(statsTick, 1000);
     setInterval(refreshUpdate, 10 * 60 * 1000);
+    pollUpdate();
     refreshStun();
     setInterval(refreshStun, 2 * 60 * 1000);
     autoLoop();
@@ -279,9 +280,64 @@ function renderVoicePanel() {
 
 function renderUpdate() {
   const u = S.update;
-  $("#updateBanner").hidden = !(u && u.available);
+  $("#updateBanner").hidden = !(u && u.available) || !!(u && u.busy);
   if (u && u.available) $("#updateText").textContent = `Доступна новая версия Zeno ${u.version}`;
+  renderUpdateScreen();
 }
+
+// ---------- экран обновления на все окно ----------
+// При запуске программа сама проверяет релизы и, если включено «обновлять при
+// запуске», сразу ставит новую версию - тогда здесь экран с прогрессом. Если
+// выключено - при запуске предлагаем обновиться на весь экран (один раз).
+let updPrompted = false;
+let updEl = null;
+const bootAt = Date.now();
+
+function renderUpdateScreen() {
+  const u = S.update || {};
+  const busy = !!u.busy;
+  const failed = !busy && !!u.error && !!updEl;
+  const prompt = !busy && !failed && u.available && !updPrompted && S.settings.update_on_start === false && Date.now() - bootAt < 120000;
+  if (!busy && !failed && !prompt) {
+    if (updEl) updEl.remove();
+    updEl = null;
+    return;
+  }
+  const pct = u.progress >= 0 ? Math.round(u.progress * 100) : null;
+  const body = [];
+  if (busy) {
+    body.push(h("h2", {}, `Обновляю Zeno до ${u.version}`),
+      h("p", {}, (u.message || "Скачиваю обновление") + (pct !== null && pct < 100 ? ` · ${pct}%` : "")),
+      h("div", { class: "upd-bar" + (pct === null ? " run" : "") }, h("i", { style: { width: (pct === null ? 30 : pct) + "%" } })),
+      h("p", { class: "upd-hint" }, "Zeno перезапустится сам, ничего нажимать не нужно."));
+  } else if (failed) {
+    body.push(h("h2", {}, "Обновление не установилось"), h("p", { class: "upd-err" }, u.error),
+      h("div", { class: "upd-btns" },
+        h("button", { class: "btn primary", onclick: () => api("update/install").catch(fail) }, "Попробовать снова"),
+        h("button", { class: "btn ghost", onclick: () => { S.update = { ...u, error: "" }; updPrompted = true; updEl.remove(); updEl = null; } }, "Продолжить без обновления")));
+  } else {
+    body.push(h("h2", {}, `Вышла новая версия Zeno ${u.version}`), h("p", {}, `У вас ${S.version}. Обновление займет несколько секунд.`),
+      u.notes ? h("div", { class: "upd-notes" }, u.notes) : null,
+      h("div", { class: "upd-btns" },
+        h("button", { class: "btn primary", onclick: () => api("update/install").then(pollUpdate).catch(fail) }, "Обновить сейчас"),
+        h("button", { class: "btn ghost", onclick: () => { updPrompted = true; renderUpdateScreen(); } }, "Позже")));
+  }
+  const card = h("div", { class: "upd-card" }, h("div", { class: "upd-logo", html: icon("refresh", 34) }), ...body);
+  if (!updEl) {
+    updEl = h("div", { class: "upd-screen" });
+    document.body.append(updEl);
+  }
+  updEl.replaceChildren(card);
+}
+
+// pollUpdate: при запуске и пока идет установка состояние спрашиваем часто
+async function pollUpdate() {
+  await refreshUpdate();
+  const u = S.update || {};
+  const starting = !u.checked && Date.now() - bootAt < 60000;
+  if (u.busy || starting) setTimeout(pollUpdate, u.busy ? 400 : 1000);
+}
+
 
 async function refreshUpdate() {
   try {
@@ -295,7 +351,7 @@ $("#updateBtn").onclick = async () => {
   if (S.call && !confirm("Обновление перезапустит Zeno. Звонок прервется на несколько секунд и восстановится сам, если у друга Zeno 0.5.4 или новее. Продолжить?")) return;
   try {
     await api("update/install");
-    toast("Скачиваю обновление, Zeno перезапустится сам");
+    pollUpdate();
   } catch (e) { fail(e); }
 };
 
@@ -3877,9 +3933,13 @@ function secApp() {
     }),
     switchRow("Звуки", "Звонок, сообщения, подключение.", S.media.sounds, (v) => setMedia({ sounds: v })),
     switchRow("Уведомления о сообщениях", "Когда окно свернуто или открыт другой разговор.", S.media.notifyMessages, (v) => setMedia({ notifyMessages: v })),
-    switchRow("Проверять обновления", "Раз в 6 часов смотреть новую версию на GitHub.", S.settings.check_updates !== false, (v) => {
+    switchRow("Проверять обновления", "При запуске и раз в 6 часов смотреть новую версию на GitHub.", S.settings.check_updates !== false, (v) => {
       S.settings.check_updates = v;
       api("settings", { check_updates: v }).catch(fail);
+    }),
+    switchRow("Обновлять при запуске сам", "Новая версия ставится сразу при запуске Zeno. Выключено - при запуске Zeno спросит на весь экран.", S.settings.update_on_start !== false, (v) => {
+      S.settings.update_on_start = v;
+      api("settings", { update_on_start: v }).catch(fail);
     }),
     h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Zeno " + S.version), status), updBtn),
   ];
