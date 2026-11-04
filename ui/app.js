@@ -177,10 +177,10 @@ function staticIcons() {
   $("#dmVideo").innerHTML = icon("video", 22);
   $("#dmLink").innerHTML = icon("link", 20);
   $("#dmApps").innerHTML = icon("apps", 20);
+  $("#sbApps").innerHTML = icon("apps", 20);
   $("#sendBtn").innerHTML = icon("send", 20);
   $("#vpHang").innerHTML = icon("hang", 22);
   $("#sbHang").innerHTML = icon("hang", 24);
-  $("#sbScreenOpts").innerHTML = icon("sliders", 20);
   $("#sbMore").innerHTML = icon("dots", 20);
   $("#sbMicOpts").innerHTML = icon("down", 14);
   $("#sbCamOpts").innerHTML = icon("down", 14);
@@ -1810,7 +1810,7 @@ function remoteScreen(p) {
 
 const APPS = [
   {
-    id: "vlan", name: "virtualZeno", icon: "lan",
+    id: "vlan", name: "virtualZeno", icon: "lan", tag: "Локальная сеть", color: "#1f8a5b",
     desc: "Локальная сеть с другом, как Hamachi: LAN-игры, общие папки и ping по адресам 10.77.x.y. Включается, когда запустили оба.",
   },
 ];
@@ -1983,30 +1983,54 @@ function renderLanbar() {
   bar.replaceChildren(h("span", { class: "lan-ico", html: icon("lan", 18) }), h("div", { class: "lb-text", html: `<b>virtualZeno</b> · ${l.text}` }), ...btns);
 }
 
+// openApps: окно приложений плитками (как активности в Discord). Клик по
+// плитке открывает под сеткой описание и кнопку запуска. Открывается и из
+// шапки чата, и из панели звонка.
 function openApps(id) {
   const f = fr(id);
   if (!f) return;
-  const grid = h("div", { class: "apps-grid" });
-  const m = modal({ title: "Приложения", sub: `Запускаются вдвоем с ${f.nick}`, body: grid, wide: true });
+  let pick = APPS[0].id;
+  const grid = h("div", { class: "apps-tiles" });
+  const detail = h("div", { class: "app-detail" });
+  const m = modal({ title: "Приложения", sub: `Запускаются вдвоем с ${f.nick}`, body: [grid, detail], wide: true });
+  m.box.classList.add("apps-modal");
+  const state = (a) => {
+    const l = lanLine(id); // пока приложение одно - virtualZeno
+    if (l.on && l.remote) return { l, badge: "Запущено", cls: "on" };
+    if (l.on) return { l, badge: "Ждем " + f.nick, cls: "wait" };
+    if (l.remote) return { l, badge: f.nick + " ждет", cls: "invite" };
+    return { l, badge: "", cls: "" };
+  };
   const draw = () => {
     grid.replaceChildren(...APPS.map((a) => {
-      const l = lanLine(id);
-      const btn = l.on
-        ? h("button", { class: "btn small", onclick: () => { lanExit(id); draw(); } }, "Выйти")
-        : h("button", { class: "btn small " + (l.remote ? "green" : "primary"), onclick: async () => { await lanStart(id); if (lanOn(id)) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
-      return h("div", { class: "app-card" + (l.on ? " on" : "") },
-        h("div", { class: "app-art", html: icon(a.icon, 40) }),
-        h("div", { class: "app-info" },
-          h("div", { class: "app-name" }, a.name),
-          h("div", { class: "app-desc" }, a.desc),
-          l.text ? h("div", { class: "app-state", html: l.text }) : null),
-        btn);
-    }));
+      const st = state(a);
+      return h("button", { class: "app-tile" + (a.id === pick ? " sel" : ""), onclick: () => { pick = a.id; draw(); } },
+        h("div", { class: "app-tile-art", style: { background: a.color }, html: icon(a.icon, 44) },
+          st.badge ? h("span", { class: "app-badge " + st.cls }, st.badge) : null),
+        h("div", { class: "app-tile-name" }, a.name),
+        h("div", { class: "app-tile-tag" }, a.tag));
+    }), h("div", { class: "app-tile soon", "aria-hidden": "true" },
+      h("div", { class: "app-tile-art", html: icon("plus", 32) }),
+      h("div", { class: "app-tile-name" }, "Скоро"),
+      h("div", { class: "app-tile-tag" }, "новые приложения")));
+    const a = APPS.find((x) => x.id === pick);
+    const { l } = state(a);
+    const btn = l.on
+      ? h("button", { class: "btn", onclick: () => { lanExit(id); draw(); } }, "Выйти")
+      : h("button", { class: "btn " + (l.remote ? "green" : "primary"), onclick: async () => { await lanStart(id); if (lanOn(id)) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
+    detail.replaceChildren(
+      h("div", { class: "app-detail-head" },
+        h("div", { class: "app-detail-art", style: { background: a.color }, html: icon(a.icon, 26) }),
+        h("div", { class: "app-detail-title" }, h("div", { class: "app-name" }, a.name), h("div", { class: "app-tile-tag" }, a.tag)),
+        btn),
+      h("div", { class: "app-desc" }, a.desc),
+      l.text ? h("div", { class: "app-state", html: l.text }) : null);
   };
   draw();
 }
 
 $("#dmApps").onclick = () => openApps(S.sel);
+$("#sbApps").onclick = () => { if (S.call) openApps(S.call.id); };
 
 // nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп
 async function nativeTick() {
@@ -2316,10 +2340,16 @@ function renderStage() {
   sbCam.innerHTML = icon(S.cam ? "video" : "videoOff", 20);
   sbCam.classList.toggle("on", !!S.cam);
   sbCam.title = S.cam ? "Выключить камеру" : "Включить камеру";
+  const sbDeaf = $("#sbDeaf");
+  sbDeaf.innerHTML = icon(S.deaf ? "headOff" : "head", 20);
+  sbDeaf.classList.toggle("off", S.deaf);
+  sbDeaf.title = S.deaf ? "Включить звук" : "Выключить звук";
   const sbScr = $("#sbScreen");
-  sbScr.innerHTML = icon(S.screen ? "screenOff" : "screen", 20);
-  sbScr.classList.toggle("on", !!S.screen);
+  sbScr.innerHTML = icon(S.screen ? "screenOff" : "screen", 20) + `<span>${S.screen ? "Остановить" : "Экран"}</span>`;
   sbScr.title = S.screen ? "Остановить трансляцию" : "Транслировать экран";
+  $("#sbScreenBox").classList.toggle("live", !!S.screen);
+  $("#sbScreenBox").classList.toggle("disabled", c.state !== "active");
+  $("#sbScreenOpts").textContent = S.media.screenPreset.replace("source", "Исх. ");
   sbCam.disabled = sbScr.disabled = c.state !== "active";
   $("#sbStats").classList.toggle("on", S.showStats);
   $("#sbCollapse").innerHTML = icon(stripHidden() ? "up" : "down", 20);
@@ -2509,10 +2539,13 @@ $("#sbCamOpts").onclick = async (e) => {
   ], "up");
 };
 
+$("#sbDeaf").onclick = () => setDeaf(!S.deaf);
+
 $("#sbMore").onclick = (e) => {
   const scr = S.screen ? "myscreen" : (S.call && (S.remote.get(S.call.id) || {}).screen ? "theirscreen" : null);
   openMenu(e.currentTarget, [
     menuItem(cinema() ? "Обычный вид" : "Режим кинотеатра", false, toggleTheater),
+    menuItem(S.full ? "Выйти из полноэкранного" : "Во весь экран", false, () => setFull(!S.full)),
     menuItem("Статистика", S.showStats, () => { S.showStats = !S.showStats; renderStage(); }),
     scr ? menuItem("Сохранить кадр трансляции", false, () => snapshot(scr).catch(fail)) : null,
     h("div", { class: "menu-sep" }),

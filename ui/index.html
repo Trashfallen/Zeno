@@ -103,25 +103,28 @@
         <div class="stage-strip" id="stageStrip"></div>
         <div class="stage-bar">
           <button class="bar-icon" id="sbCollapse" title="Скрыть участников"></button>
-          <div class="bar-center">
-            <div class="bar-group">
+          <div class="bar-panel" role="toolbar" aria-label="Звонок">
+            <div class="bar-split">
               <button class="bar-btn" id="sbMic" title="Микрофон"></button>
               <button class="bar-caret" id="sbMicOpts" title="Устройства звука"></button>
+            </div>
+            <button class="bar-btn" id="sbDeaf" title="Выключить звук"></button>
+            <div class="bar-split">
               <button class="bar-btn" id="sbCam" title="Камера"></button>
               <button class="bar-caret" id="sbCamOpts" title="Камера: устройство и качество"></button>
             </div>
-            <div class="bar-group">
-              <button class="bar-btn" id="sbScreen" title="Транслировать экран"></button>
-              <button class="bar-btn" id="sbScreenOpts" title="Качество трансляции"></button>
-              <button class="bar-btn" id="sbMore" title="Еще"></button>
+            <div class="bar-screen" id="sbScreenBox">
+              <button class="bar-scr" id="sbScreen" title="Транслировать экран"></button>
+              <button class="bar-q" id="sbScreenOpts" title="Качество трансляции"></button>
             </div>
-            <button class="bar-hang" id="sbHang" title="Отключиться"></button>
-          </div>
-          <div class="bar-right">
+            <span class="bar-sep" aria-hidden="true"></span>
+            <button class="bar-icon" id="sbApps" title="Приложения"></button>
             <button class="bar-icon" id="sbVolume" title="Громкость"></button>
-            <button class="bar-icon" id="sbStats" title="Статистика"></button>
-            <button class="bar-icon" id="sbTheater" title="Режим кинотеатра (T)"></button>
-            <button class="bar-icon" id="sbFull" title="Во весь экран"></button>
+            <button class="bar-icon bar-wide" id="sbStats" title="Статистика"></button>
+            <button class="bar-icon bar-wide" id="sbTheater" title="Режим кинотеатра (T)"></button>
+            <button class="bar-icon bar-wide" id="sbFull" title="Во весь экран"></button>
+            <button class="bar-icon" id="sbMore" title="Еще"></button>
+            <button class="bar-hang" id="sbHang" title="Отключиться"></button>
           </div>
         </div>
         <div class="stage-resizer" id="stageResizer" title="Потяните, чтобы изменить высоту. Двойной клик - как было"><i></i></div>
