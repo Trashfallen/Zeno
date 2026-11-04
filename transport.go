@@ -34,6 +34,12 @@ var defaultBrokers = []string{
 	"wss://broker.hivemq.com:8884/mqtt",
 	"ssl://broker.emqx.io:8883",
 	"https://ntfy.sh",
+	// Еще публичные ntfy: у ntfy.sh лимит 250 сообщений в сутки на IP, и когда
+	// у друга работает только HTTPS (MQTT-порты не проходят), его исчерпание
+	// обрывало связь до утра. У этих свои лимиты (17280 и 1 млн в сутки).
+	"https://ntfy.envs.net",
+	"https://ntfy.adminforge.de",
+	"https://ntfy.mzte.de",
 }
 
 type transport interface {
