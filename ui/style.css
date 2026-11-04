@@ -755,3 +755,22 @@ body.theater .stage-strip.collapsed { display: flex; }
 .yg-with { color: var(--muted); font-size: 14px; }
 .yg-head .spacer { flex: 1; }
 .yg-frame { flex: 1; width: 100%; border: 0; background: #1e1f22; }
+
+/* вложения в чате */
+.att-imgbox { position: relative; margin-top: 4px; max-width: 420px; }
+.att-img { display: block; max-width: 100%; max-height: 320px; border-radius: 8px; cursor: pointer; background: var(--side); }
+.att-imgbox .att-bar { position: absolute; left: 8px; right: 8px; bottom: 8px; }
+.att-file {
+  margin-top: 4px; display: flex; align-items: center; gap: 12px; max-width: 420px; padding: 10px 12px;
+  border-radius: 8px; background: var(--side); border: 1px solid var(--line);
+}
+.att-file.fail { opacity: .6; }
+.att-ico { color: var(--accent); display: grid; place-items: center; flex: none; }
+.att-info { flex: 1; min-width: 0; }
+.att-name { color: #00a8fc; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.att-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.att-file.fail .att-sub { color: var(--red); }
+.att-bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .12); margin-top: 6px; overflow: hidden; }
+.att-bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width .1s; }
+.att-gone { margin-top: 4px; color: var(--muted); font-size: 13px; font-style: italic; }
+.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }

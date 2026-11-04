@@ -177,6 +177,7 @@ function staticIcons() {
   $("#dmVideo").innerHTML = icon("video", 22);
   $("#dmLink").innerHTML = icon("link", 20);
   $("#dmApps").innerHTML = icon("apps", 20);
+  $("#attachBtn").innerHTML = icon("clip", 20);
   $("#sbApps").innerHTML = icon("apps", 20);
   $("#sendBtn").innerHTML = icon("send", 20);
   $("#vpHang").innerHTML = icon("hang", 22);
@@ -490,7 +491,8 @@ function renderMessages(id, force) {
     } else {
       el.append(h("span", { class: "side-time" }, hhmm(m.ts)));
     }
-    el.append(h("div", { class: "text", html: linkify(m.text) }));
+    if (m.text) el.append(h("div", { class: "text", html: linkify(m.text) }));
+    if (m.file) el.append(fileView(m));
     if (m.from === S.me.id && m.status) {
       el.append(h("span", { class: "state " + m.status, title: m.status === "delivered" ? "Доставлено" : "Отправляется",
         html: icon(m.status === "delivered" ? "checks" : "check", 16) }));
@@ -560,6 +562,267 @@ function sendMessage() {
   api("history/add", { friend: id, msg: m }).catch(fail);
 }
 
+// ---------- файлы и картинки ----------
+// Байты идут напрямую другу по каналу данных кусками по 64 КБ (каждый кусок -
+// id файла 36 байт + данные), с ожиданием, если канал занят. Договор:
+// file (что за файл) -> file-ok (готов принять) -> куски -> file-end -> file-done.
+// Принятое программа пишет в «Загрузки\Zeno»; картинки до 25 МБ показываются
+// в чате, а свою отправленную картинку тоже кладем туда, чтобы она была в
+// истории после перезапуска. Друг на старой версии не ответит file-ok.
+
+const CHUNK = 64 * 1024;
+const MAX_FILE = 4 * 1024 ** 3;
+const SHOW_IMG = 25 * 1024 * 1024;
+const fileTx = new Map(); // id -> { res, rej, friend } - ждем file-ok
+const fileRx = new Map(); // id -> прием: { friend, msg, got, pend, pendLen, img, chain }
+const blobs = new Map(); // id сообщения -> blob: URL картинки
+const sendChain = new Map(); // друг -> очередь отправки (по одному файлу)
+
+const isImage = (mime) => /^image\/(png|jpe?g|gif|webp|bmp)$/i.test(mime || "");
+const showable = (f) => isImage(f.mime) && f.size <= SHOW_IMG;
+
+function fmtSize(n) {
+  if (n < 1024) return n + " Б";
+  if (n < 1024 ** 2) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " КБ";
+  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " МБ";
+  return (n / 1024 ** 3).toFixed(2) + " ГБ";
+}
+
+function b64(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function joinParts(parts, len) {
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+const fileMsg = (m) => ({ id: m.id, from: m.from, ts: m.ts, text: m.text || "", file: { name: m.file.name, size: m.file.size, mime: m.file.mime, path: m.file.path, fail: m.file.fail } });
+
+function attachFiles(list) {
+  const id = S.sel;
+  const p = peerOf(id);
+  if (!p || !p.connected) return toast("Нет соединения с другом: файлы идут напрямую", "err");
+  for (const file of list) {
+    if (!file.size) continue;
+    if (file.size > MAX_FILE) { toast(`${file.name}: больше 4 ГБ, не отправить`, "err"); continue; }
+    const m = { id: crypto.randomUUID(), from: S.me.id, ts: Date.now(), text: "", status: "sending", progress: 0,
+      file: { name: file.name || "картинка.png", size: file.size, mime: file.type || "" } };
+    if (showable(m.file)) blobs.set(m.id, URL.createObjectURL(file));
+    pushMsg(id, m);
+    const chain = (sendChain.get(id) || Promise.resolve()).then(() => sendFile(id, file, m)).catch((e) => {
+      api("file/cancel", { id: "own-" + m.id }).catch(() => {}); // недописанная своя копия картинки
+      m.file.fail = true;
+      m.progress = null;
+      toast(`${m.file.name} не отправлен: ${e.message}`, "err");
+      api("history/add", { friend: id, msg: fileMsg(m) }).catch(() => {});
+      renderMessages(id);
+    });
+    sendChain.set(id, chain);
+  }
+}
+
+async function sendFile(id, file, m) {
+  const p = peerOf(id);
+  if (!p || !p.connected) throw new Error("соединение оборвалось");
+  const ready = new Promise((res, rej) => {
+    fileTx.set(m.id, { res, rej, friend: id });
+    setTimeout(() => rej(new Error("друг не ответил - у него старая версия Zeno?")), 15000);
+  });
+  p.send({ k: "file", id: m.id, ts: m.ts, name: m.file.name, size: m.file.size, mime: m.file.mime });
+  try { await ready; } finally { fileTx.delete(m.id); }
+  const keep = showable(m.file); // своя копия картинки - для истории
+  const own = "own-" + m.id;
+  if (keep) await api("file/begin", { id: own, name: m.file.name });
+  const head = new TextEncoder().encode(m.id);
+  let ownParts = [], ownLen = 0;
+  for (let off = 0; off < file.size; off += CHUNK) {
+    const data = new Uint8Array(await file.slice(off, off + CHUNK).arrayBuffer());
+    const buf = new Uint8Array(head.length + data.length);
+    buf.set(head);
+    buf.set(data, head.length);
+    await p.sendBinary(buf.buffer);
+    if (keep) {
+      ownParts.push(data);
+      ownLen += data.length;
+      if (ownLen >= 1 << 20) {
+        await api("file/chunk", { id: own, data: b64(joinParts(ownParts, ownLen)) });
+        ownParts = [];
+        ownLen = 0;
+      }
+    }
+    setProgress(id, m, (off + data.length) / file.size);
+  }
+  p.send({ k: "file-end", id: m.id });
+  if (keep) {
+    if (ownLen) await api("file/chunk", { id: own, data: b64(joinParts(ownParts, ownLen)) });
+    m.file.path = (await api("file/end", { id: own })).path;
+  }
+  m.progress = null;
+  api("history/add", { friend: id, msg: fileMsg(m) }).catch(() => {});
+  renderMessages(id);
+}
+
+// setProgress обновляет полоску прямо в разметке, без перерисовки всего чата
+let progressAt = 0;
+function setProgress(id, m, frac) {
+  m.progress = frac;
+  const now = performance.now();
+  if (frac < 1 && now - progressAt < 100) return;
+  progressAt = now;
+  const box = document.querySelector(`[data-mid="${m.id}"]`);
+  if (!box) return;
+  const bar = box.querySelector(".att-bar i");
+  if (bar) bar.style.width = Math.round(frac * 100) + "%";
+  const t = box.querySelector(".att-sub");
+  if (t) t.textContent = `${fmtSize(m.file.size)} · ${Math.round(frac * 100)}%`;
+}
+
+async function onFileOffer(id, m) {
+  const p = peerOf(id);
+  const size = Number(m.size) || 0;
+  if (typeof m.id !== "string" || m.id.length !== 36 || fileRx.has(m.id) || size <= 0 || size > MAX_FILE) return;
+  const list = S.msgs.get(id) || [];
+  if (list.some((x) => x.id === m.id)) return;
+  const msg = { id: m.id, from: id, ts: Math.min(Number(m.ts) || Date.now(), Date.now()), text: "", progress: 0,
+    file: { name: String(m.name || "файл").slice(0, 200), size, mime: String(m.mime || "").slice(0, 100) } };
+  try {
+    await api("file/begin", { id: msg.id, name: msg.file.name });
+  } catch (e) {
+    return toast("Файл не принят: " + e.message, "err");
+  }
+  fileRx.set(msg.id, { friend: id, msg, got: 0, pend: [], pendLen: 0, img: showable(msg.file) ? [] : null, chain: Promise.resolve() });
+  pushMsg(id, msg);
+  p.send({ k: "file-ok", id: msg.id });
+  const f = fr(id);
+  if (!(document.hasFocus() && S.view === "dm" && S.sel === id)) {
+    S.unread.set(id, (S.unread.get(id) || 0) + 1);
+    if (S.media.notifyMessages) api("notify", { title: f.nick, text: "Файл: " + msg.file.name }).catch(() => {});
+    renderSide();
+  }
+}
+
+function flushRx(rx) {
+  if (!rx.pendLen) return rx.chain;
+  const data = b64(joinParts(rx.pend, rx.pendLen));
+  rx.pend = [];
+  rx.pendLen = 0;
+  rx.chain = rx.chain.then(() => api("file/chunk", { id: rx.msg.id, data }));
+  return rx.chain;
+}
+
+function onPeerBinary(id, buf) {
+  if (buf.byteLength <= 36) return;
+  const fid = new TextDecoder().decode(new Uint8Array(buf, 0, 36));
+  const rx = fileRx.get(fid);
+  if (!rx || rx.friend !== id) return;
+  const data = new Uint8Array(buf, 36);
+  rx.pend.push(data);
+  rx.pendLen += data.length;
+  rx.got += data.length;
+  if (rx.img) rx.img.push(data);
+  if (rx.pendLen >= 1 << 20) flushRx(rx).catch(() => {});
+  setProgress(id, rx.msg, Math.min(1, rx.got / rx.msg.file.size));
+}
+
+async function onFileEnd(id, fid) {
+  const rx = fileRx.get(fid);
+  if (!rx || rx.friend !== id) return;
+  fileRx.delete(fid);
+  const msg = rx.msg;
+  try {
+    await flushRx(rx);
+    msg.file.path = (await api("file/end", { id: fid })).path;
+    if (rx.img) blobs.set(fid, URL.createObjectURL(new Blob([joinParts(rx.img, rx.got)], { type: msg.file.mime })));
+  } catch (e) {
+    msg.file.fail = true;
+    api("file/cancel", { id: fid }).catch(() => {});
+  }
+  msg.progress = null;
+  api("history/add", { friend: id, msg: fileMsg(msg) }).catch(() => {});
+  peerOf(id).send({ k: "file-done", id: fid });
+  renderMessages(id);
+}
+
+// filesLost: связь оборвалась - недопринятое удаляем, неотправленное помечаем
+function filesLost(id) {
+  for (const [fid, rx] of fileRx) {
+    if (rx.friend !== id) continue;
+    fileRx.delete(fid);
+    rx.msg.file.fail = true;
+    rx.msg.progress = null;
+    api("file/cancel", { id: fid }).catch(() => {});
+    api("history/add", { friend: id, msg: fileMsg(rx.msg) }).catch(() => {});
+  }
+  for (const [, tx] of fileTx) if (tx.friend === id) tx.rej(new Error("соединение оборвалось"));
+  renderMessages(id);
+}
+
+async function loadImage(m, img) {
+  try {
+    const r = await api("file/read", { path: m.file.path });
+    const bin = atob(r.data);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([u8], { type: m.file.mime }));
+    blobs.set(m.id, url);
+    img.src = url;
+  } catch (e) {
+    img.replaceWith(h("div", { class: "att-gone" }, "Картинка удалена из папки Zeno"));
+  }
+}
+
+function fileView(m) {
+  const f = m.file;
+  const open = (reveal) => (e) => { e.stopPropagation(); api("file/open", { path: f.path, reveal }).catch(fail); };
+  const busy = m.progress != null && !f.fail;
+  const bar = busy ? h("div", { class: "att-bar" }, h("i", { style: { width: Math.round(m.progress * 100) + "%" } })) : null;
+  if (showable(f) && !f.fail && (blobs.has(m.id) || f.path)) {
+    const img = h("img", { class: "att-img", alt: f.name, title: f.path ? "Открыть" : f.name, draggable: "false" });
+    if (blobs.has(m.id)) img.src = blobs.get(m.id);
+    else loadImage(m, img);
+    if (f.path) img.onclick = open(false);
+    return h("div", { class: "att-imgbox", "data-mid": m.id }, img, bar);
+  }
+  const sub = f.fail ? "не передан" : busy ? `${fmtSize(f.size)} · ${Math.round(m.progress * 100)}%` : fmtSize(f.size);
+  return h("div", { class: "att-file" + (f.fail ? " fail" : ""), "data-mid": m.id },
+    h("span", { class: "att-ico", html: icon("file", 26) }),
+    h("div", { class: "att-info" }, h("div", { class: "att-name", title: f.name }, f.name), h("div", { class: "att-sub" }, sub), bar),
+    f.path && !busy ? h("button", { class: "icon-btn", title: "Открыть", html: icon("file", 18), onclick: open(false) }) : null,
+    f.path && !busy ? h("button", { class: "icon-btn", title: "Показать в папке", html: icon("folder", 18), onclick: open(true) }) : null);
+}
+
+$("#attachBtn").onclick = () => $("#fileInput").click();
+$("#fileInput").onchange = (e) => {
+  attachFiles([...e.target.files]);
+  e.target.value = "";
+};
+input.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData ? e.clipboardData.files : [])];
+  if (!files.length) return;
+  e.preventDefault();
+  attachFiles(files);
+});
+{
+  const chat = $("#messages").parentElement;
+  chat.addEventListener("dragover", (e) => {
+    if (S.view !== "dm" || ![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    chat.classList.add("drop");
+  });
+  chat.addEventListener("dragleave", (e) => { if (!chat.contains(e.relatedTarget)) chat.classList.remove("drop"); });
+  chat.addEventListener("drop", (e) => {
+    chat.classList.remove("drop");
+    if (S.view !== "dm" || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    attachFiles([...e.dataTransfer.files]);
+  });
+}
+
 // ---------- соединение ----------
 
 // S.stunAuto - выбор программы: только серверы, видящие настоящий адрес (мимо VPN)
@@ -585,6 +848,7 @@ function getPeer(id) {
   p = new Peer(fr(id), { iceServers, voiceKbps: () => S.media.voiceKbps, codec: () => S.media.codec });
   p.addEventListener("state", (e) => onPeerState(id, e.detail));
   p.addEventListener("message", (e) => onPeerMessage(id, e.detail).catch(fail));
+  p.addEventListener("binary", (e) => onPeerBinary(id, e.detail));
   p.addEventListener("media", () => onPeerMedia(id));
   p.addEventListener("lost", (e) => onPeerLost(id, e.detail));
   S.peers.set(id, p);
@@ -626,6 +890,7 @@ function onPeerLost(id, why) {
     p.autoAt = 0;
   }
   S.remote.delete(id);
+  filesLost(id);
   const inCall = S.call && S.call.id === id && (S.call.state === "active" || S.call.state === "reconnecting");
   if (inCall) callLost();
   else if (S.call && S.call.id === id) endCall("Соединение потеряно");
@@ -653,6 +918,25 @@ async function onPeerMessage(id, m) {
           S.friends = r.friends;
           renderAll();
         } catch (e) { /* ник не прошел проверку - оставляем старый */ }
+      }
+      break;
+    }
+    case "file":
+      await onFileOffer(id, m);
+      break;
+    case "file-ok": {
+      const tx = fileTx.get(m.id);
+      if (tx) tx.res();
+      break;
+    }
+    case "file-end":
+      await onFileEnd(id, m.id);
+      break;
+    case "file-done": {
+      const x = (S.msgs.get(id) || []).find((y) => y.id === m.id);
+      if (x) {
+        x.status = "delivered";
+        renderMessages(id);
       }
       break;
     }

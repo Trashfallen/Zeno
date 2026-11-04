@@ -180,6 +180,8 @@ export class Peer extends EventTarget {
 
   _bindDC(dc) {
     this.dc = dc;
+    dc.binaryType = "arraybuffer";
+    dc.bufferedAmountLowThreshold = 1 << 20;
     dc.onopen = () => {
       if (dc !== this.dc) return;
       this._setState("connected");
@@ -187,6 +189,7 @@ export class Peer extends EventTarget {
     };
     dc.onclose = () => { if (dc === this.dc) this._lost("канал закрыт"); };
     dc.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) return this.emit("binary", e.data); // кусок файла
       let m;
       try { m = JSON.parse(e.data); } catch (err) { return; }
       if (m.k === "sdp") this._onSDP(m.d).catch((err) => console.warn("sdp", err));
@@ -199,6 +202,23 @@ export class Peer extends EventTarget {
     if (!this.dc || this.dc.readyState !== "open") return false;
     this.dc.send(JSON.stringify(obj));
     return true;
+  }
+
+  // sendBinary шлет кусок файла. Если в канале уже много неотправленного -
+  // ждет, пока уйдет: иначе файл забьет очередь и чат встанет за ним.
+  async sendBinary(buf) {
+    const dc = this.dc;
+    if (!dc || dc.readyState !== "open") throw new Error("соединение оборвалось");
+    if (dc.bufferedAmount > 4 << 20) {
+      await new Promise((resolve, reject) => {
+        const done = () => { dc.removeEventListener("bufferedamountlow", done); dc.removeEventListener("close", fail); resolve(); };
+        const fail = () => { dc.removeEventListener("bufferedamountlow", done); reject(new Error("соединение оборвалось")); };
+        dc.addEventListener("bufferedamountlow", done);
+        dc.addEventListener("close", fail);
+      });
+    }
+    if (dc !== this.dc || dc.readyState !== "open") throw new Error("соединение оборвалось");
+    dc.send(buf);
   }
 
   // ---------- медиа ----------

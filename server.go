@@ -243,6 +243,28 @@ func (s *Server) route(path string, body M) (any, error) {
 		on, _ := body["on"].(bool)
 		app.window.SetFullscreen(on)
 		return nil, nil
+	case "file/begin":
+		return nil, app.FileBegin(str(body, "id"), str(body, "name"))
+	case "file/chunk":
+		return nil, app.FileChunk(str(body, "id"), str(body, "data"))
+	case "file/end":
+		p, err := app.FileEnd(str(body, "id"))
+		if err != nil {
+			return nil, err
+		}
+		return M{"path": p}, nil
+	case "file/cancel":
+		app.FileCancel(str(body, "id"))
+		return nil, nil
+	case "file/read":
+		d, err := app.FileRead(str(body, "path"))
+		if err != nil {
+			return nil, err
+		}
+		return M{"data": d}, nil
+	case "file/open":
+		reveal, _ := body["reveal"].(bool)
+		return nil, app.FileOpen(str(body, "path"), reveal)
 	case "snapshot":
 		path, err := saveSnapshot(str(body, "png"))
 		if err != nil {

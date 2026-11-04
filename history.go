@@ -21,10 +21,21 @@ import (
 const maxMessage = 4000 // знаков
 
 type Message struct {
-	ID   string `json:"id"`
-	From string `json:"from"` // ключ автора
-	TS   int64  `json:"ts"`   // мс
-	Text string `json:"text"`
+	ID   string    `json:"id"`
+	From string    `json:"from"` // ключ автора
+	TS   int64     `json:"ts"`   // мс
+	Text string    `json:"text"`
+	File *FileInfo `json:"file,omitempty"` // вложение (файл или картинка)
+}
+
+// FileInfo - вложение в сообщении. Path - где лежит у нас (пусто, если
+// отправили большой файл и копию не сохраняли).
+type FileInfo struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	Mime string `json:"mime,omitempty"`
+	Path string `json:"path,omitempty"`
+	Fail bool   `json:"fail,omitempty"` // передача сорвалась
 }
 
 func (a *Account) historyPath(friend string) string {
