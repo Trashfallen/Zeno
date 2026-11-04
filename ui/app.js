@@ -447,6 +447,7 @@ function renderDM() {
   renderMessages(id);
   renderStage();
   renderLanbar();
+  renderYgbar();
 }
 
 function linkify(text) {
@@ -606,6 +607,7 @@ function onPeerState(id, st) {
       p.send({ k: "hello", nick: S.me.nick, color: S.me.color, v: S.version });
       if (S.call && S.call.id === id && S.call.state === "reconnecting") p.send({ k: "resume" });
       lanAnnounce(id);
+      ygAnnounce(id);
       sfx.play("connect");
       toast(`Соединено с ${f.nick}`, "ok");
       closeConnectModal(id);
@@ -731,6 +733,12 @@ async function onPeerMessage(id, m) {
     case "lan-offer":
     case "lan-answer":
       await onLanMessage(id, m);
+      break;
+    case "yg-invite":
+    case "yg-end":
+    case "yg-open":
+    case "yg-ws":
+      onYgMessage(id, m);
       break;
     case "state":
       if (!m.screen) closeNativeIn();
@@ -1808,10 +1816,17 @@ function remoteScreen(p) {
 // lan-state (запущен или нет), lan-offer -> lan-answer (соединение между
 // программами, internal/vlan). Соединение предлагает тот, у кого ключ меньше.
 
+// line(id) -> { on, remote, text }: запущено у нас, запущено у друга, строка состояния
 const APPS = [
   {
     id: "vlan", name: "virtualZeno", icon: "lan", tag: "Локальная сеть", color: "#1f8a5b",
     desc: "Локальная сеть с другом, как Hamachi: LAN-игры, общие папки и ping по адресам 10.77.x.y. Включается, когда запустили оба.",
+    line: (id) => lanLine(id), start: (id) => lanStart(id), exit: (id) => lanExit(id),
+  },
+  {
+    id: "yaguessr", name: "ЯГессер", icon: "globe", tag: "Игра", color: "#c9822b",
+    desc: "Угадай место по панораме Google или Яндекса: классика, дуэль, канат, ставки и другие режимы. Комната живет в Zeno того, кто запустил, свой сервер не нужен.",
+    line: (id) => ygLine(id), start: (id) => ygStart(id), exit: () => ygClose(),
   },
 ];
 
@@ -1995,7 +2010,7 @@ function openApps(id) {
   const m = modal({ title: "Приложения", sub: `Запускаются вдвоем с ${f.nick}`, body: [grid, detail], wide: true });
   m.box.classList.add("apps-modal");
   const state = (a) => {
-    const l = lanLine(id); // пока приложение одно - virtualZeno
+    const l = a.line(id);
     if (l.on && l.remote) return { l, badge: "Запущено", cls: "on" };
     if (l.on) return { l, badge: "Ждем " + f.nick, cls: "wait" };
     if (l.remote) return { l, badge: f.nick + " ждет", cls: "invite" };
@@ -2016,8 +2031,8 @@ function openApps(id) {
     const a = APPS.find((x) => x.id === pick);
     const { l } = state(a);
     const btn = l.on
-      ? h("button", { class: "btn", onclick: () => { lanExit(id); draw(); } }, "Выйти")
-      : h("button", { class: "btn " + (l.remote ? "green" : "primary"), onclick: async () => { await lanStart(id); if (lanOn(id)) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
+      ? h("button", { class: "btn", onclick: () => { a.exit(id); draw(); } }, "Выйти")
+      : h("button", { class: "btn " + (l.remote ? "green" : "primary"), onclick: async () => { await a.start(id); if (a.line(id).on) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
     detail.replaceChildren(
       h("div", { class: "app-detail-head" },
         h("div", { class: "app-detail-art", style: { background: a.color }, html: icon(a.icon, 26) }),
@@ -2031,6 +2046,177 @@ function openApps(id) {
 
 $("#dmApps").onclick = () => openApps(S.sel);
 $("#sbApps").onclick = () => { if (S.call) openApps(S.call.id); };
+
+// ---------- ЯГессер ----------
+// Игра из internal/yaguessr открывается окном поверх чата (/yg/ этого же
+// Zeno). Хост создает комнату у себя и шлет другу yg-invite. Окно игры гостя
+// вместо WebSocket говорит с нами (postMessage), мы - с хостом по каналу
+// данных: yg-open (подключи меня), yg-ws (сообщения игры и закрытие), а
+// страница хоста держит за гостя WebSocket к своему /yg/ws?as=<ID гостя>.
+
+S.yg = null; // { friend, role: "host"|"guest", room, el, frame, min }
+S.ygInvite = new Map(); // id -> код комнаты, куда друг зовет
+S.ygRelay = new Map(); // хост: id гостя -> WebSocket к своей комнате
+
+function ygLine(id) {
+  const f = fr(id);
+  const g = S.yg && S.yg.friend === id ? S.yg : null;
+  const on = !!g;
+  const remote = g ? (g.role === "guest" || S.ygRelay.has(id)) : S.ygInvite.has(id);
+  let text = "";
+  if (g && g.role === "host") text = remote ? `Комната <b>${esc(g.room || "")}</b>, <b>${esc(f.nick)}</b> в игре.` : `Комната <b>${esc(g.room || "…")}</b>. Ждем, когда <b>${esc(f.nick)}</b> присоединится.`;
+  else if (g) text = `Вы в комнате <b>${esc(f.nick)}</b>.`;
+  else if (remote) text = `<b>${esc(f.nick)}</b> зовет в ЯГессер.`;
+  return { on, remote, text };
+}
+
+function ygAnnounce(id) {
+  const p = peerOf(id);
+  if (p && S.yg && S.yg.role === "host" && S.yg.friend === id && S.yg.room) p.send({ k: "yg-invite", room: S.yg.room });
+}
+
+async function ygOpen(id, role, room) {
+  ygClose();
+  await api("yg/open"); // печенье для окна игры
+  const f = fr(id);
+  const frame = h("iframe", { class: "yg-frame", allow: "fullscreen; clipboard-write", src: "/yg/?zeno=" + role + (room ? "&room=" + encodeURIComponent(room) : "") });
+  const g = { friend: id, role, room, frame, min: false };
+  g.el = h("div", { class: "yg-overlay" },
+    h("div", { class: "yg-head" },
+      h("span", { class: "yg-ico", html: icon("globe", 18) }),
+      h("b", {}, "ЯГессер"), h("span", { class: "yg-with" }, "с " + f.nick),
+      h("div", { class: "spacer" }),
+      h("button", { class: "btn small ghost", onclick: () => ygMin(true) }, "Свернуть"),
+      h("button", { class: "btn small", onclick: () => ygClose() }, "Выйти")),
+    frame);
+  S.yg = g;
+  $(".main").append(g.el);
+  renderYgbar();
+}
+
+async function ygStart(id) {
+  const room = S.ygInvite.get(id);
+  try {
+    await ygOpen(id, room ? "guest" : "host", room);
+  } catch (e) { fail(e); }
+}
+
+function ygMin(min) {
+  if (!S.yg) return;
+  S.yg.min = min;
+  S.yg.el.classList.toggle("min", min);
+  renderYgbar();
+}
+
+function ygClose() {
+  const g = S.yg;
+  if (!g) return;
+  S.yg = null;
+  const p = peerOf(g.friend);
+  if (g.role === "host") {
+    for (const [fid, ws] of S.ygRelay) {
+      S.ygRelay.delete(fid);
+      try { ws.close(); } catch (e) { /* уже закрыт */ }
+    }
+    if (p) p.send({ k: "yg-end" });
+  } else if (p) p.send({ k: "yg-ws", e: "close" });
+  g.el.remove();
+  renderYgbar();
+}
+
+function toYgFrame(msg) {
+  if (S.yg && S.yg.frame.contentWindow) S.yg.frame.contentWindow.postMessage(msg, location.origin);
+}
+
+// сообщения из окна игры
+window.addEventListener("message", (e) => {
+  const g = S.yg;
+  if (!g || e.origin !== location.origin || e.source !== g.frame.contentWindow || !e.data) return;
+  const d = e.data;
+  const p = peerOf(g.friend);
+  if (d.yg === "room" && g.role === "host") {
+    g.room = d.code;
+    ygAnnounce(g.friend);
+    renderYgbar();
+  } else if (d.yg === "leave") ygClose();
+  else if (g.role === "guest" && d.ygws) {
+    if (!p || !p.connected) {
+      if (d.ygws === "connect") toYgFrame({ ygws: "close" });
+      return;
+    }
+    if (d.ygws === "connect") p.send({ k: "yg-open", room: g.room });
+    else if (d.ygws === "send") p.send({ k: "yg-ws", e: "msg", d: String(d.data) });
+    else if (d.ygws === "close") p.send({ k: "yg-ws", e: "close" });
+  }
+});
+
+function onYgMessage(id, m) {
+  const f = fr(id);
+  const g = S.yg && S.yg.friend === id ? S.yg : null;
+  const p = peerOf(id);
+  switch (m.k) {
+    case "yg-invite":
+      if (typeof m.room !== "string") break;
+      if (!S.ygInvite.has(id) && !g) toast(`${f.nick} зовет в ЯГессер - присоединяйтесь в чате с ним`, "ok");
+      S.ygInvite.set(id, m.room);
+      break;
+    case "yg-end":
+      S.ygInvite.delete(id);
+      if (g && g.role === "guest") {
+        ygClose();
+        toast(`${f.nick} закрыл ЯГессер`);
+      }
+      break;
+    case "yg-open": {
+      // гость просит подключить его к нашей комнате
+      if (!g || g.role !== "host") {
+        p.send({ k: "yg-end" });
+        break;
+      }
+      const old = S.ygRelay.get(id);
+      if (old) old.close();
+      const ws = new WebSocket("ws://" + location.host + "/yg/ws?as=" + encodeURIComponent(id));
+      S.ygRelay.set(id, ws);
+      ws.onopen = () => p.send({ k: "yg-ws", e: "open" });
+      ws.onmessage = (e) => p.send({ k: "yg-ws", e: "msg", d: e.data });
+      ws.onclose = () => {
+        if (S.ygRelay.get(id) !== ws) return;
+        S.ygRelay.delete(id);
+        p.send({ k: "yg-ws", e: "close" });
+        renderYgbar();
+      };
+      break;
+    }
+    case "yg-ws":
+      if (g && g.role === "guest") toYgFrame({ ygws: m.e, data: m.d });
+      else if (S.ygRelay.has(id)) {
+        const ws = S.ygRelay.get(id);
+        if (m.e === "msg" && ws.readyState === WebSocket.OPEN) ws.send(String(m.d));
+        else if (m.e === "close") {
+          S.ygRelay.delete(id);
+          ws.close();
+        }
+      }
+      break;
+  }
+  renderYgbar();
+}
+
+function renderYgbar() {
+  const bar = $("#ygbar");
+  if (!bar) return;
+  const id = S.view === "dm" ? S.sel : null;
+  const l = id && fr(id) ? ygLine(id) : null;
+  const g = S.yg;
+  bar.hidden = !l || (!l.on && !l.remote);
+  if (bar.hidden) return;
+  const btns = [];
+  if (l.on && g.min) btns.push(h("button", { class: "btn small primary", onclick: () => ygMin(false) }, "Открыть"));
+  btns.push(l.on
+    ? h("button", { class: "btn small", onclick: () => ygClose() }, "Выйти")
+    : h("button", { class: "btn small green", onclick: () => ygStart(id) }, "Присоединиться"));
+  bar.replaceChildren(h("span", { class: "lan-ico", html: icon("globe", 18) }), h("div", { class: "lb-text", html: `<b>ЯГессер</b> · ${l.text}` }), ...btns);
+}
 
 // nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп
 async function nativeTick() {

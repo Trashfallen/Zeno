@@ -210,7 +210,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 .ub-login { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .avatar.speaking, .tile.speaking .avatar { box-shadow: 0 0 0 2px var(--side), 0 0 0 4px var(--green); }
 
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--main); }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--main); position: relative; }
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .head {
   height: 48px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px;
@@ -744,3 +744,14 @@ body.theater .stage-strip .tile.small { box-shadow: 0 6px 24px rgba(0, 0, 0, .55
 @container (max-width: 720px) { .bar-wide { display: none; } }
 .stage-strip.collapsed { display: none; }
 body.theater .stage-strip.collapsed { display: flex; }
+
+/* ЯГессер: окно игры поверх чата */
+.ygbar { border-left-color: #c9822b; }
+.ygbar .lan-ico { color: #e0a04a; }
+.yg-overlay { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; background: var(--main); }
+.yg-overlay.min { visibility: hidden; pointer-events: none; }
+.yg-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--side); border-bottom: 1px solid #26272b; color: var(--head); }
+.yg-ico { color: #e0a04a; display: grid; place-items: center; }
+.yg-with { color: var(--muted); font-size: 14px; }
+.yg-head .spacer { flex: 1; }
+.yg-frame { flex: 1; width: 100%; border: 0; background: #1e1f22; }

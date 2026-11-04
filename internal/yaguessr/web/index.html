@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ЯГессер</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css">
+  <script src="skin.js"></script>
+</head>
+<body>
+  <!-- Вход -->
+  <section id="menu" class="screen center">
+    <div class="card">
+      <h1>ЯГессер</h1>
+      <p class="muted">Угадай место по панораме Яндекса или Google. Можно одному, можно с друзьями.</p>
+
+      <label for="name">Ник</label>
+      <input id="name" type="text" maxlength="20" placeholder="Как тебя будут видеть другие" autocomplete="off">
+
+      <div id="keyBlock" class="hidden">
+        <label for="apiKey">API-ключ Яндекс Карт (JavaScript API)</label>
+        <input id="apiKey" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off">
+        <p class="hint">Нужен только для панорам Яндекса, Google работает без ключа. Ключ берется в <a href="https://developer.tech.yandex.ru/services" target="_blank" rel="noopener">кабинете разработчика</a>: сервис «JavaScript API и HTTP Геокодер». Сохраняется только в этом браузере.</p>
+      </div>
+
+      <button id="createBtn" class="primary wide">Создать комнату</button>
+      <div class="join">
+        <input id="roomCode" type="text" maxlength="5" placeholder="Код комнаты" autocomplete="off">
+        <button id="joinBtn">Войти</button>
+      </div>
+      <button id="mapsBtn" class="wide-secondary">Свои карты</button>
+      <p id="menuError" class="error"></p>
+      <p class="hint center-text"><span id="meLine"></span> &middot; <a href="api/logout">Выйти</a></p>
+    </div>
+  </section>
+
+  <!-- Свои карты -->
+  <section id="maps" class="screen center hidden">
+    <div class="card">
+      <h2>Свои карты</h2>
+      <p class="muted">Нарисуй области на карте мира, и места для раундов будут выбираться только внутри них.</p>
+      <ul id="mapList" class="map-list"></ul>
+      <button id="newMapBtn" class="primary wide">Новая карта</button>
+      <button id="mapsBack" class="link">Назад</button>
+    </div>
+  </section>
+
+  <!-- Редактор карты -->
+  <section id="editor" class="screen hidden">
+    <div id="editMap"></div>
+    <div class="editor-bar">
+      <input id="mapName" type="text" maxlength="40" placeholder="Название карты">
+      <input id="placeSearch" type="text" placeholder="Найти город и нажать Enter">
+      <div class="tools">
+        <button data-tool="brush" title="Кисть: зажми и веди">Кисть</button>
+        <button data-tool="circle" title="Круг: зажми в центре и тяни">Круг</button>
+        <button data-tool="erase" title="Ластик: стирает круги под ним">Ластик</button>
+        <button data-tool="pan" title="Двигать карту">Рука</button>
+      </div>
+      <label id="brushBox" class="brush">Размер <input id="brushSize" type="range" min="6" max="80" value="24"></label>
+      <div class="tools">
+        <button id="undoBtn" title="Отменить (Ctrl+Z)">Отменить</button>
+        <button id="clearBtn">Очистить</button>
+        <button id="saveMapBtn" class="primary">Сохранить</button>
+        <button id="editorBack">Назад</button>
+      </div>
+      <span id="zoneCount" class="muted"></span>
+      <span id="editorError" class="error"></span>
+    </div>
+    <p class="editor-hint">Панорамы Яндекса есть в основном в городах России и соседних стран, а пустые области тратят лимит поисков. У Google панорамы почти по всему миру, и поиск по ним бесплатный.</p>
+  </section>
+
+  <!-- Лобби -->
+  <section id="lobby" class="screen center hidden">
+    <div class="card">
+      <h2>Комната <span id="lobbyCode" class="code"></span></h2>
+      <div class="invite">
+        <input id="inviteLink" type="text" readonly>
+        <button id="copyLink">Копировать</button>
+      </div>
+
+      <label>Игроки</label>
+      <ul id="playerList" class="players"></ul>
+
+      <fieldset id="settingsBox">
+        <label for="provider">Панорамы</label>
+        <select id="provider">
+          <option value="google">Google: весь мир, без лимита</option>
+          <option value="yandex" id="optYandex">Яндекс: Россия и соседи, 100 поисков в сутки</option>
+        </select>
+        <label for="region">Карта</label>
+        <select id="region"></select>
+        <label for="mode">Режим</label>
+        <select id="mode">
+          <option value="classic">Классика</option>
+          <option value="duel">Дуэль (6000 HP)</option>
+          <option value="tug">Канат</option>
+          <option value="speed">Кто быстрее</option>
+          <option value="bets">Ставки</option>
+          <option value="conquer">Захват стран</option>
+          <option value="coop">Общая экспедиция</option>
+          <option value="scout">Штурман и разведчик</option>
+          <option value="twoviews">Два взгляда</option>
+          <option value="custom">Загадай место</option>
+        </select>
+        <div id="roundsBox">
+          <label for="rounds">Раундов</label>
+          <select id="rounds">
+            <option>1</option>
+            <option>3</option>
+            <option selected>5</option>
+            <option>10</option>
+            <option>15</option>
+            <option>20</option>
+          </select>
+        </div>
+        <div id="coopBox" class="row">
+          <div>
+            <label for="coopLevel">Сложность экспедиции</label>
+            <select id="coopLevel">
+              <option value="tourist">Турист: 2500 за раунд</option>
+              <option value="traveler" selected>Путешественник: 3500 за раунд</option>
+              <option value="cartographer">Картограф: 4500 за раунд</option>
+            </select>
+          </div>
+          <div id="coopRuleBox">
+            <label for="coopRule">В зачет команде</label>
+            <select id="coopRule">
+              <option value="best">Лучший ответ</option>
+              <option value="middle">Середина ответов</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="timer">Время на раунд</label>
+            <select id="timer">
+              <option value="0">Без лимита</option>
+              <option value="10">10 с</option>
+              <option value="20">20 с</option>
+              <option value="30">30 с</option>
+              <option value="60">1 мин</option>
+              <option value="90">1:30</option>
+              <option value="120" selected>2 мин</option>
+              <option value="180">3 мин</option>
+              <option value="300">5 мин</option>
+            </select>
+          </div>
+          <div>
+            <label for="guessTimer">После первого ответа</label>
+            <select id="guessTimer">
+              <option value="0">Не сокращать</option>
+              <option value="10">Остается 10 с</option>
+              <option value="15" selected>Остается 15 с</option>
+              <option value="30">Остается 30 с</option>
+              <option value="60">Остается 1 мин</option>
+            </select>
+          </div>
+        </div>
+        <div id="layerBox">
+          <label for="layer">Вид панорам Яндекса</label>
+          <select id="layer">
+            <option value="ground">Уличные</option>
+            <option value="air">Воздушные шары: вид сверху, перелеты только по шарам</option>
+          </select>
+        </div>
+        <label for="move">Движение</label>
+        <select id="move">
+          <option value="move">Можно ходить</option>
+          <option value="nomove" id="optNomove">Без перемещения (крутить и приближать)</option>
+          <option value="nmpz">NMPZ: только смотреть, без поворота и зума</option>
+        </select>
+        <label class="check" id="hideMarkersBox"><input id="hideMarkers" type="checkbox" checked> Скрывать номера домов на панораме</label>
+        <p id="modeHint" class="hint"></p>
+      </fieldset>
+
+      <button id="startBtn" class="primary wide">Начать</button>
+      <p id="lobbyStatus" class="muted center-text"></p>
+      <p id="usageLine" class="hint center-text"></p>
+      <p id="lobbyError" class="error"></p>
+      <button id="leaveBtn" class="link">Выйти из комнаты</button>
+    </div>
+  </section>
+
+  <!-- Игра -->
+  <section id="game" class="screen hidden">
+    <div id="pano"></div>
+    <iframe id="panoFrame" class="pano-frame hidden" allow="accelerometer; gyroscope; fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>
+    <!-- второе окно: заранее грузит панораму следующего раунда, пока открыты итоги -->
+    <iframe id="panoFrame2" class="pano-frame hidden" allow="accelerometer; gyroscope; fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>
+    <!-- встроенные панорамы показывают в левом верхнем углу адрес: закрываем его -->
+    <div id="addrCover" class="addr-cover hidden"></div>
+    <div id="panoBlock" class="pano-block hidden"></div>
+    <div id="loading" class="loading hidden">Загружаем панораму...</div>
+    <!-- штурман панорамы не видит -->
+    <div id="roleCover" class="role-cover hidden">
+      <div>
+        <h2>Ты штурман</h2>
+        <p>Панораму видит разведчик. Расспрашивай его и ставь метку на карте.</p>
+      </div>
+    </div>
+    <div id="roleNote" class="role-note hidden">Ты разведчик: рассказывай штурману, что видишь. Метку ставит он.</div>
+    <div id="tugBar" class="tug-bar hidden">
+      <span id="tugMe" class="tug-name"></span>
+      <div class="tug-track"><i id="tugKnot"></i></div>
+      <span id="tugThem" class="tug-name"></span>
+    </div>
+
+    <div class="topbar">
+      <span>Раунд <b id="roundNum">1</b><span id="roundOf"> / <b id="roundTotal">5</b></span></span>
+      <span id="scoreBox">Очки: <b id="scoreTotal">0</b></span>
+      <span id="teamBox" class="hidden">Команда: <b id="teamVal">0</b> / <span id="teamGoal">0</span></span>
+      <span id="multBox" class="hidden">Урон <b id="multVal">x1</b></span>
+      <span id="speedBox" class="hidden">Множитель <b id="speedVal">x1</b></span>
+      <span id="timerBox" class="hidden">Время: <b id="timerVal">0:00</b></span>
+      <button id="backToStart" title="Вернуться на стартовую точку">В начало</button>
+      <button id="soundBtn" title="Звуки таймера и конца раунда">Звук</button>
+      <button id="rerollBtn" title="Если панорама не открылась, хост подберет другое место">Нет панорамы?</button>
+      <button id="endBtn" class="hidden" title="Закончить игру и показать итоги по сыгранным раундам">Закончить игру</button>
+    </div>
+    <ul id="guessStatus" class="guess-status"></ul>
+
+    <div id="mini" class="mini">
+      <div id="miniResize" class="mini-resize" title="Потяни, чтобы изменить размер карты">&#8689;</div>
+      <div class="mini-tools">
+        <button id="miniSmaller" title="Уменьшить карту">&minus;</button>
+        <button id="miniBigger" title="Увеличить карту">+</button>
+        <button id="pinMini" title="Не сворачивать карту">&#9638;</button>
+      </div>
+      <div id="minimap"></div>
+      <div id="betBox" class="bet-box hidden" title="Ставка играет, если промах не больше указанного расстояния, иначе штраф">
+        <span>Ставка</span>
+        <button data-bet="1" class="on">x1</button>
+        <button data-bet="2">x2</button>
+        <button data-bet="3">x3</button>
+        <span id="betSafe" class="bet-safe"></span>
+      </div>
+      <button id="guessBtn" class="primary" disabled>Поставь метку на карте</button>
+    </div>
+  </section>
+
+  <!-- Загадай место -->
+  <section id="pick" class="screen hidden">
+    <div id="pickMap"></div>
+    <div class="pick-panel">
+      <h2>Загадай место <span class="muted-inline">к раунду <span id="pickRound">1</span></span></h2>
+      <p class="hint">Поставь точку там, куда отправишь соперника. Панораму Google рядом с ней найдем сами. Пока остальные думают, можно передумать.</p>
+      <ul id="pickStatus" class="pick-status"></ul>
+      <p id="pickInfo" class="hint"></p>
+      <button id="pickBtn" class="primary" disabled>Загадать</button>
+      <button id="pickEnd" class="link hidden">Закончить игру</button>
+    </div>
+  </section>
+  <!-- Итог раунда и игры -->
+  <section id="result" class="screen hidden">
+    <div id="resultMap"></div>
+    <div class="result-panel">
+      <div id="resultText"></div>
+      <div id="resultTable"></div>
+      <button id="nextBtn" class="primary">Дальше</button>
+      <button id="endBtn2" class="link hidden">Закончить игру</button>
+      <p id="nextWait" class="muted hidden">Ждем, пока хост продолжит</p>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="regions.js"></script>
+  <script src="config.js" onerror="window.YA_API_KEY = ''"></script>
+  <script src="sound.js"></script>
+  <script src="metrics.js"></script>
+  <script src="mapstyle.js"></script>
+  <script src="game.js"></script>
+  <script src="modes.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>

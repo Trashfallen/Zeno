@@ -79,6 +79,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.api(w, r)
 		return
 	}
+	if isYG(r.URL.Path) {
+		s.ygServe(w, r)
+		return
+	}
 	s.static(w, r)
 }
 
@@ -137,6 +141,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
+	if path == "yg/open" {
+		s.ygCookieSet(w) // окно ЯГессера ходит в /yg/ с этим печеньем
+	}
 	res, err := s.route(path, body)
 	switch {
 	case errors.Is(err, errNotFound):
@@ -259,6 +266,8 @@ func (s *Server) route(path string, body M) (any, error) {
 		return nil, nil
 	case "quit":
 		go app.Quit()
+		return nil, nil
+	case "yg/open":
 		return nil, nil
 	}
 

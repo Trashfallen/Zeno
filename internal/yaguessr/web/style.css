@@ -1,0 +1,317 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: #1b1f2a;
+  color: #f2f3f5;
+  overflow: hidden;
+}
+
+.screen { position: fixed; inset: 0; }
+.screen.center { display: flex; align-items: center; justify-content: center; padding: 16px; overflow-y: auto; }
+.center-text { text-align: center; }
+.wide { width: 100%; margin-top: 20px; padding: 12px; font-size: 17px; }
+.join { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 12px; }
+.join input { text-transform: uppercase; letter-spacing: 2px; }
+.card h2 { margin: 0 0 12px; }
+.code { color: #ffcc33; letter-spacing: 3px; }
+.invite { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.invite input { font-size: 13px !important; }
+fieldset { border: 0; padding: 0; margin: 0; }
+fieldset:disabled { opacity: .7; }
+button.link { background: none; color: #8b93a6; width: 100%; font-size: 14px; }
+.players { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.players li { background: #1b1f2a; border-radius: 8px; padding: 5px 10px; font-size: 14px; display: flex; gap: 6px; align-items: center; }
+.players li.offline { opacity: .45; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.guess-status {
+  position: absolute; top: 60px; left: 12px; z-index: 4;
+  list-style: none; margin: 0; padding: 6px 10px; border-radius: 10px;
+  background: rgba(27, 31, 42, .85); font-size: 13px;
+}
+.guess-status:empty { display: none; }
+.guess-status li { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+.guess-status li.done::after { content: "\2713"; color: #7ddc7d; }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20;
+  background: #ffcc33; color: #1b1f2a; padding: 8px 16px; border-radius: 8px; font-weight: 600;
+}
+#resultTable table { border-collapse: collapse; font-size: 15px; }
+#resultTable td, #resultTable th { padding: 4px 12px; border-bottom: 1px solid #333a4c; text-align: right; }
+#resultTable td:first-child, #resultTable th:first-child { text-align: left; }
+#resultTable td.me { font-weight: 700; }
+.hidden { display: none !important; }
+.muted { color: #9aa3b5; margin-top: -8px; }
+.error { color: #ff8080; min-height: 1em; }
+
+/* Настройки */
+#setup { display: flex; align-items: center; justify-content: center; padding: 16px; }
+.card {
+  width: 100%;
+  max-width: 440px;
+  background: #262c3b;
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .4);
+}
+.card h1 { margin: 0 0 8px; font-size: 32px; }
+.card label { display: block; margin: 14px 0 6px; font-size: 14px; color: #c7cdd9; }
+.card label.check { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.card input[type=text], .card input[type=password], .card select {
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid #3b4357;
+  background: #1b1f2a;
+  color: inherit;
+  font-size: 15px;
+}
+.card .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.hint { font-size: 12px; color: #8b93a6; margin: 6px 0 0; }
+.hint a { color: #ffcc33; }
+
+button {
+  font: inherit;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  background: #3b4357;
+  color: inherit;
+}
+button.primary { background: #ffcc33; color: #1b1f2a; font-weight: 600; }
+button:disabled { opacity: .55; cursor: default; }
+#startBtn { width: 100%; margin-top: 20px; padding: 12px; font-size: 17px; }
+
+/* Игра */
+#pano { position: absolute; inset: 0; }
+.loading {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #1b1f2a; font-size: 20px; z-index: 5;
+}
+.topbar {
+  position: absolute; top: 12px; left: 12px; z-index: 4;
+  display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  background: rgba(27, 31, 42, .85);
+  padding: 8px 14px; border-radius: 10px;
+}
+.topbar button { padding: 4px 10px; font-size: 14px; }
+#timerBox.low b { color: #ff6b6b; }
+
+.mini {
+  position: absolute; right: 16px; bottom: 16px; z-index: 4;
+  width: 300px; height: 230px;
+  display: flex; flex-direction: column; gap: 6px;
+  opacity: .8;
+  transition: width .2s, height .2s, opacity .2s;
+}
+/* развернутый размер задает игрок: кнопки + / - и уголок, значения в --mw / --mh */
+.mini:hover, .mini.pinned, .mini.dragging {
+  width: min(var(--mw, 480px), calc(100vw - 32px));
+  height: min(var(--mh, 360px), calc(100vh - 90px));
+  opacity: 1;
+}
+.mini.dragging { transition: none; }
+#minimap { flex: 1; position: relative; z-index: 0; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 20px rgba(0, 0, 0, .5); }
+#guessBtn { padding: 10px; }
+.mini-tools {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  display: flex; gap: 4px; opacity: 0; transition: opacity .2s;
+}
+.mini:hover .mini-tools, .mini.pinned .mini-tools { opacity: 1; }
+.mini-tools button { padding: 2px 9px; font-size: 15px; line-height: 20px; background: rgba(27, 31, 42, .85); }
+.mini.pinned #pinMini { background: #ffcc33; color: #1b1f2a; }
+.mini-resize {
+  position: absolute; top: -7px; left: -7px; z-index: 3;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: #ffcc33; color: #1b1f2a; font-size: 13px; line-height: 22px; text-align: center;
+  cursor: nwse-resize; touch-action: none; user-select: none;
+  opacity: 0; transition: opacity .2s;
+}
+.mini:hover .mini-resize, .mini.pinned .mini-resize, .mini.dragging .mini-resize { opacity: 1; }
+
+/* Итог */
+#resultMap { position: absolute; inset: 0 0 auto 0; height: 62%; z-index: 0; }
+.result-panel {
+  position: absolute; inset: 62% 0 0 0;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 16px; overflow-y: auto; background: #1b1f2a;
+}
+#resultText { font-size: 20px; text-align: center; }
+#resultText b { color: #ffcc33; }
+#resultText a { color: #8fb8ff; font-size: 15px; }
+.bar { width: min(520px, 100%); height: 10px; border-radius: 5px; background: #3b4357; overflow: hidden; }
+#resultBar { height: 100%; width: 0; background: #ffcc33; transition: width .6s; }
+#finalTable table { border-collapse: collapse; font-size: 15px; }
+#finalTable td, #finalTable th { padding: 4px 14px; border-bottom: 1px solid #333a4c; text-align: right; }
+#finalTable td:first-child, #finalTable th:first-child { text-align: left; }
+#nextBtn { padding: 10px 40px; font-size: 17px; }
+
+@media (max-width: 600px) {
+  .mini { width: 210px; height: 190px; right: 8px; bottom: 8px; }
+  .mini:hover, .mini.pinned, .mini.dragging {
+    width: min(var(--mw, 480px), calc(100vw - 16px));
+    height: min(var(--mh, 360px), 70vh);
+  }
+  .topbar { gap: 10px; font-size: 13px; left: 8px; right: 8px; }
+}
+
+/* Свои карты */
+.wide-secondary { width: 100%; margin-top: 10px; padding: 10px; }
+.map-list { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 8px; max-height: 45vh; overflow-y: auto; }
+.map-list li { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #1b1f2a; border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+.map-list li.muted { background: none; }
+.map-actions { display: flex; gap: 6px; flex: none; }
+.map-actions button { padding: 5px 10px; font-size: 13px; }
+
+#editMap { position: absolute; inset: 0; z-index: 0; } /* слои Leaflet (z-index 400+) остаются внутри карты */
+.editor-bar {
+  position: absolute; top: 12px; left: 12px; right: 12px; z-index: 4;
+  display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+  background: rgba(27, 31, 42, .9); padding: 8px 12px; border-radius: 10px;
+}
+.editor-bar input[type=text] {
+  padding: 7px 10px; border-radius: 8px; border: 1px solid #3b4357;
+  background: #1b1f2a; color: inherit; font-size: 15px; width: 220px;
+}
+.editor-bar .tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.editor-bar button { padding: 6px 12px; font-size: 14px; }
+.editor-bar button.active { background: #ffcc33; color: #1b1f2a; }
+.editor-bar .brush { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+.editor-bar .error:empty { display: none; }
+.editor-hint {
+  position: absolute; left: 12px; bottom: 12px; z-index: 4; margin: 0; max-width: 520px;
+  background: rgba(27, 31, 42, .85); padding: 6px 10px; border-radius: 8px; font-size: 12px; color: #c7cdd9;
+}
+@media (max-width: 600px) {
+  .editor-bar { left: 8px; right: 8px; top: 8px; }
+  .editor-bar input[type=text] { width: 100%; }
+  .editor-hint { left: 8px; right: 60px; bottom: 8px; }
+}
+
+/* Лобби: управление игроками, режимы */
+.players li .pl-btn { padding: 1px 7px; font-size: 12px; margin-left: 2px; background: #3b4357; }
+.players li .hp { color: #7ddc7d; font-size: 12px; }
+.pano-block { position: absolute; inset: 0; z-index: 3; cursor: not-allowed; }
+.guess-status li.out { opacity: .45; text-decoration: line-through; }
+.guess-status .hpbar { width: 70px; height: 6px; background: #3b4357; border-radius: 3px; overflow: hidden; }
+.guess-status .hpbar i { display: block; height: 100%; background: #7ddc7d; }
+#resultTable td.dmg { color: #ff8080; }
+
+/* Встроенные панорамы Google и Яндекса */
+.pano-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+/* предзагрузка: окно рисуется (иначе браузер не грузит панораму), но его не видно и в него не кликнуть */
+.pano-frame.preload { opacity: .01; pointer-events: none; }
+.addr-cover {
+  position: absolute; top: 0; left: 0; z-index: 2;
+  width: 300px; height: 82px; background: #1b1f2a; border-bottom-right-radius: 12px;
+}
+#rerollBtn { background: #4a3b3b; }
+
+/* Карты на Leaflet */
+.leaflet-container { background: #a9c8e8; font: inherit; }
+.leaflet-control-attribution { font-size: 9px !important; line-height: 1.3; padding: 0 4px !important; }
+.yg-pin {
+  width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5); box-sizing: border-box;
+}
+.yg-answer {
+  min-width: 24px; height: 24px; padding: 0 5px; border-radius: 12px; border: 2px solid #fff;
+  background: #2e9d4a; color: #fff; font-size: 13px; font-weight: 700; line-height: 20px; text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5); box-sizing: border-box;
+}
+#placeSearch { width: 190px !important; }
+
+/* Переключатель стиля карты (mapstyle.js) */
+.ms-ctl { position: relative; }
+.ms-btn { background: rgba(27, 31, 42, .88); color: #f2f3f5; padding: 4px 9px; font-size: 13px; border-radius: 6px; }
+.ms-list {
+  display: none; position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 1;
+  margin: 0; padding: 4px; list-style: none; min-width: 130px;
+  background: rgba(27, 31, 42, .96); border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .4);
+}
+.leaflet-top .ms-list { bottom: auto; top: calc(100% + 4px); }
+.leaflet-right .ms-list { left: auto; right: 0; }
+.ms-ctl.open .ms-list { display: block; }
+.ms-list li { padding: 5px 10px; border-radius: 5px; cursor: pointer; color: #f2f3f5; white-space: nowrap; font-size: 14px; }
+.ms-list li:hover { background: #3b4357; }
+.ms-list li.on { background: #ffcc33; color: #1b1f2a; }
+.ms-list li.ms-sep { height: 1px; padding: 0; margin: 4px 6px; background: #3b4357; cursor: default; }
+
+/* стилизованные карты: сепия на тайлах и бумага с виньеткой поверх */
+/* фильтр на каждом тайле, а не на всем слое: фильтр слоя пересчитывается каждый кадр зума и мигает */
+.ms-parchment .leaflet-tile, .ms-atlas .ms-osm .leaflet-tile { filter: sepia(.5) saturate(.75) contrast(.95) brightness(1.02); }
+.ms-topo .leaflet-tile { filter: sepia(.45) saturate(.8) contrast(.97); }
+.ms-paper { background: #E6DBC0; }
+.ms-paper::after {
+  content: ""; position: absolute; inset: 0; z-index: 450; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .27 0 0 0 0 .15 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  /* без mix-blend-mode: он заставляет перерисовывать всю карту на каждом кадре зума */
+  opacity: .3; box-shadow: inset 0 0 50px rgba(90, 60, 20, .45);
+}
+
+/* ---------- Режимы игры ---------- */
+/* штурман и разведчик */
+.role-cover {
+  position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center;
+  background: #1b1f2a; text-align: center; padding: 20px;
+}
+.role-cover h2 { margin: 0 0 8px; font-size: 28px; }
+.role-cover p { max-width: 420px; color: #c7cdd9; }
+.role-note {
+  position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 4;
+  max-width: min(460px, calc(100% - 24px)); padding: 8px 14px; border-radius: 10px;
+  background: rgba(27, 31, 42, .9); text-align: center; font-size: 14px;
+}
+.mini.scout-hide { display: none; }
+
+/* канат */
+.tug-bar {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 4;
+  display: flex; align-items: center; gap: 10px; width: min(440px, calc(100% - 360px));
+  min-width: 240px; padding: 8px 14px; border-radius: 10px; background: rgba(27, 31, 42, .85);
+}
+.tug-bar.inline { position: static; transform: none; width: auto; min-width: 0; margin-top: 8px; padding: 0; background: none; }
+.tug-name { font-size: 13px; white-space: nowrap; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.tug-track { flex: 1; height: 6px; position: relative; border-radius: 3px; background: #3b4357; }
+.tug-track::before { content: ""; position: absolute; left: 50%; top: -5px; bottom: -5px; width: 2px; margin-left: -1px; background: #8b93a6; }
+.tug-track i {
+  position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+  border-radius: 50%; background: #ffcc33; border: 2px solid #1b1f2a; transition: left .6s;
+}
+
+/* ставки */
+.bet-box { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 8px; border-radius: 8px; background: rgba(27, 31, 42, .85); font-size: 13px; }
+.bet-box button { padding: 2px 10px; font-size: 13px; }
+.bet-box button.on { background: #ffcc33; color: #1b1f2a; }
+.bet-safe { font-size: 11px; color: #9aa3b5; }
+
+/* загадай место */
+#pickMap { position: absolute; inset: 0; z-index: 0; }
+.pick-panel {
+  position: absolute; top: 12px; right: 12px; z-index: 4; width: min(340px, calc(100% - 24px));
+  display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 12px; background: rgba(27, 31, 42, .92);
+}
+.pick-panel h2 { margin: 0; font-size: 20px; }
+.muted-inline { color: #9aa3b5; font-size: 14px; font-weight: 400; }
+.pick-status { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+.pick-status li { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+.pick-status li.done::after { content: "\2713"; color: #7ddc7d; }
+.pick-status i { color: #9aa3b5; }
+
+/* общая экспедиция */
+.yg-mid {
+  width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff; box-sizing: border-box;
+  background: #ffcc33; color: #1b1f2a; font-size: 12px; line-height: 18px; text-align: center;
+}
+#resultTable tr.team-row td { border-top: 2px solid #8b93a6; font-weight: 700; }
+
+@media (max-width: 700px) {
+  .tug-bar { width: calc(100% - 24px); bottom: auto; top: 110px; }
+}
+
+/* внутри Zeno: ник, вход и приглашение дает Zeno */
+.zeno label[for="name"], .zeno #name, .zeno #createBtn, .zeno .join, .zeno #menu .hint.center-text, .zeno .invite { display: none !important; }
