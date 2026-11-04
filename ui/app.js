@@ -449,6 +449,7 @@ function renderDM() {
   renderStage();
   renderLanbar();
   renderYgbar();
+  renderBtbar();
 }
 
 function linkify(text) {
@@ -872,6 +873,7 @@ function onPeerState(id, st) {
       if (S.call && S.call.id === id && S.call.state === "reconnecting") p.send({ k: "resume" });
       lanAnnounce(id);
       ygAnnounce(id);
+      btAnnounce(id);
       sfx.play("connect");
       toast(`Соединено с ${f.nick}`, "ok");
       closeConnectModal(id);
@@ -1023,6 +1025,13 @@ async function onPeerMessage(id, m) {
     case "yg-open":
     case "yg-ws":
       onYgMessage(id, m);
+      break;
+    case "bt-offer":
+    case "bt-get":
+    case "bt-drop":
+    case "bt-link-offer":
+    case "bt-link-answer":
+      await onBtMessage(id, m);
       break;
     case "state":
       if (!m.screen) closeNativeIn();
@@ -2114,6 +2123,14 @@ const APPS = [
     desc: "Угадай место по панораме Google или Яндекса: классика, дуэль, канат, ставки и другие режимы. Комната живет в Zeno того, кто запустил, свой сервер не нужен.",
     line: (id) => ygLine(id), start: (id) => ygStart(id), exit: () => ygClose(),
   },
+  {
+    id: "bt", name: "TarBitTorrent", icon: "download", tag: "Передача файлов", color: "#2f5fbf",
+    art: '<svg viewBox="0 0 160 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><rect width="160" height="100" fill="#2f5fbf"/><g fill="#3d70d4"><rect x="10" y="62" width="10" height="26"/><rect x="24" y="52" width="10" height="36"/><rect x="38" y="70" width="10" height="18"/><rect x="112" y="58" width="10" height="30"/><rect x="126" y="44" width="10" height="44"/><rect x="140" y="66" width="10" height="22"/></g><rect x="56" y="18" width="48" height="58" rx="5" fill="#ffffff"/><path d="M90 18v14h14" fill="#cfdcf7"/><path d="M80 34v26M70 50l10 10 10-10" stroke="#2f5fbf" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="62" y="82" width="36" height="5" rx="2.5" fill="#1d3f87"/><rect x="62" y="82" width="22" height="5" rx="2.5" fill="#8fe3a8"/></svg>',
+    desc: "Большие файлы и папки другу, хоть 50 ГБ: движок TarBitTorrent, проверка каждого куска, докачка после обрыва и перезапуска. Раздача видна только другу; идет напрямую или через Zeno, если напрямую не достучаться.",
+    line: (id) => btLine(id), start: () => {}, exit: () => {},
+    buttons: (id) => btButtons(id), panel: (id) => btPanel(id),
+    badge: (id, l) => l.remote ? { badge: "Вам файл", cls: "invite" } : btMine(id).some(btBusy) ? { badge: "Идет", cls: "on" } : { badge: "", cls: "" },
+  },
 ];
 
 S.lanRemote = new Map(); // id -> друг запустил virtualZeno у себя
@@ -2287,16 +2304,17 @@ function renderLanbar() {
 // openApps: окно приложений плитками (как активности в Discord). Клик по
 // плитке открывает под сеткой описание и кнопку запуска. Открывается и из
 // шапки чата, и из панели звонка.
-function openApps(id) {
+function openApps(id, initial) {
   const f = fr(id);
   if (!f) return;
-  let pick = APPS[0].id;
+  let pick = APPS.some((a) => a.id === initial) ? initial : APPS[0].id;
   const grid = h("div", { class: "apps-tiles" });
   const detail = h("div", { class: "app-detail" });
   const m = modal({ title: "Приложения", sub: `Запускаются вдвоем с ${f.nick}`, body: [grid, detail], wide: true });
   m.box.classList.add("apps-modal");
   const state = (a) => {
     const l = a.line(id);
+    if (a.badge) return { l, ...a.badge(id, l) };
     if (l.on && l.remote) return { l, badge: "Запущено", cls: "on" };
     if (l.on) return { l, badge: "Ждем " + f.nick, cls: "wait" };
     if (l.remote) return { l, badge: f.nick + " ждет", cls: "invite" };
@@ -2316,7 +2334,8 @@ function openApps(id) {
       h("div", { class: "app-tile-tag" }, "новые приложения")));
     const a = APPS.find((x) => x.id === pick);
     const { l } = state(a);
-    const btn = l.on
+    // свои кнопки и панель (a.buttons, a.panel) - у приложений, где «запустить» мало
+    const btn = a.buttons ? a.buttons(id, draw) : l.on
       ? h("button", { class: "btn", onclick: () => { a.exit(id); draw(); } }, "Выйти")
       : h("button", { class: "btn " + (l.remote ? "green" : "primary"), onclick: async () => { await a.start(id); if (a.line(id).on) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
     detail.replaceChildren(
@@ -2325,7 +2344,8 @@ function openApps(id) {
         h("div", { class: "app-detail-title" }, h("div", { class: "app-name" }, a.name), h("div", { class: "app-tile-tag" }, a.tag)),
         btn),
       h("div", { class: "app-desc" }, a.desc),
-      ...(l.text ? [h("div", { class: "app-state", html: l.text })] : []));
+      ...(l.text && !a.panel ? [h("div", { class: "app-state", html: l.text })] : []),
+      ...(a.panel ? [a.panel(id, draw)] : []));
   };
   draw();
 }
@@ -2502,6 +2522,233 @@ function renderYgbar() {
     ? h("button", { class: "btn small", onclick: () => ygClose() }, "Выйти")
     : h("button", { class: "btn small green", onclick: () => ygStart(id) }, "Присоединиться"));
   bar.replaceChildren(h("span", { class: "lan-ico", html: icon("globe", 18) }), h("div", { class: "lb-text", html: `<b>ЯГессер</b> · ${l.text}` }), ...btns);
+}
+
+// ---------- TarBitTorrent ----------
+// Большие файлы другу (internal/btshare). Отдающий выбирает файл или папку,
+// Zeno хеширует их и шлет другу bt-offer (хеш, имя, размер, свои прямые
+// адреса). Друг выбирает папку и качает, его адреса уходят в bt-get. Кроме
+// прямых адресов движок ходит через соединение pion в Zeno (bt-link-offer ->
+// bt-link-answer), его предлагает тот, у кого ключ меньше. bt-drop - раздачу
+// остановили или от нее отказались.
+
+S.bt = { items: [], links: {}, addrs: [] }; // последний ответ bt/list
+S.btOffers = new Map(); // id друга -> Map(ih -> { ih, name, size, addrs })
+S.btLinkAt = new Map(); // id друга -> когда предлагали соединение
+S.btPanels = new Set(); // открытые списки передач (перерисовать по таймеру)
+
+const BT_STATE = {
+  hashing: "считаю контрольные суммы", seeding: "раздаю", metadata: "получаю список файлов",
+  downloading: "качаю", done: "скачано", error: "ошибка",
+};
+const btMine = (id) => S.bt.items.filter((x) => x.friend === id);
+const btBusy = (x) => ["hashing", "metadata", "downloading"].includes(x.state);
+
+function btLine(id) {
+  const f = fr(id);
+  const mine = btMine(id);
+  const offers = S.btOffers.get(id);
+  const pending = offers ? [...offers.values()].filter((o) => !mine.some((x) => x.ih === o.ih)) : [];
+  let text = "";
+  if (pending.length) text = `<b>${esc(f.nick)}</b> предлагает: ` + pending.map((o) => `<b>${esc(o.name)}</b> (${fmtSize(o.size)})`).join(", ");
+  else if (mine.some(btBusy)) text = mine.filter(btBusy).map(btItemText).join("; ");
+  return { on: mine.length > 0, remote: pending.length > 0, text, pending };
+}
+
+function btItemText(x) {
+  let t = `<b>${esc(x.name)}</b> · ${BT_STATE[x.state] || x.state}`;
+  if (x.state === "hashing" || x.state === "downloading") t += ` ${Math.floor(x.progress * 100)}%`;
+  if (x.speed > 1024 && (x.state === "downloading" || x.state === "seeding")) t += ` · ${fmtSize(x.speed)}/с`;
+  if (x.via && x.state !== "done") t += x.via === "zeno" ? " · через Zeno" : " · напрямую";
+  if (x.error) t += ` · ${esc(x.error)}`;
+  return t;
+}
+
+function btOfferTo(p, x) {
+  p.send({ k: "bt-offer", ih: x.ih, name: x.name, size: x.size, addrs: S.bt.addrs || [] });
+}
+
+// btAnnounce: друг на связи - напоминаем о своих раздачах (он отсеет уже скачанные)
+function btAnnounce(id) {
+  const p = peerOf(id);
+  if (!p) return;
+  for (const x of btMine(id)) if (x.role === "send" && x.state === "seeding") btOfferTo(p, x);
+}
+
+async function btSend(id, folder) {
+  try {
+    const r = await api("bt/pick", { folder });
+    if (!r.path) return;
+    await api("bt/share", { friend: id, path: r.path });
+    toast("Считаю контрольные суммы, потом предложу другу", "ok");
+    await btTick();
+  } catch (e) { fail(e); }
+}
+
+async function btAccept(id, ih) {
+  const map = S.btOffers.get(id);
+  const o = map && map.get(ih);
+  if (!o) return;
+  try {
+    const r = await api("bt/pick", { folder: true, for: "save" });
+    if (!r.path) return;
+    const g = await api("bt/get", { friend: id, ih, name: o.name, size: o.size, dir: r.path, addrs: o.addrs });
+    const p = peerOf(id);
+    if (p) p.send({ k: "bt-get", ih, addrs: g.addrs || [] });
+    map.delete(ih);
+    await btTick();
+  } catch (e) { fail(e); }
+}
+
+function btDecline(id, ih) {
+  const map = S.btOffers.get(id);
+  if (map) map.delete(ih);
+  const p = peerOf(id);
+  if (p) p.send({ k: "bt-drop", ih, why: "decline" });
+  btTick();
+}
+
+async function btRemove(id, x) {
+  if (x.role === "send" && x.state === "seeding" && !confirm(`Остановить раздачу «${x.name}»? Друг не сможет докачать. Файл на диске останется.`)) return;
+  await api("bt/remove", { ih: x.ih }).catch(fail);
+  const p = peerOf(id);
+  if (p && !x.ih.startsWith("hashing-")) p.send({ k: "bt-drop", ih: x.ih });
+  btTick();
+}
+
+async function onBtMessage(id, m) {
+  const f = fr(id);
+  const p = peerOf(id);
+  const addrs = Array.isArray(m.addrs) ? m.addrs.filter((a) => typeof a === "string").slice(0, 16) : [];
+  switch (m.k) {
+    case "bt-offer": {
+      if (typeof m.ih !== "string" || !/^[0-9a-f]{40}$/.test(m.ih)) break;
+      if (S.bt.items.some((x) => x.ih === m.ih)) { // уже качаем - адреса могли смениться
+        api("bt/peers", { ih: m.ih, addrs }).catch(() => {});
+        break;
+      }
+      let map = S.btOffers.get(id);
+      if (!map) S.btOffers.set(id, (map = new Map()));
+      const o = { ih: m.ih, name: String(m.name || "файл").slice(0, 255), size: Math.max(0, Number(m.size) || 0), addrs };
+      if (!map.has(m.ih)) toast(`${f.nick} предлагает «${o.name}» (${fmtSize(o.size)}) - TarBitTorrent в чате с ним`, "ok");
+      map.set(m.ih, o);
+      break;
+    }
+    case "bt-get":
+      if (typeof m.ih === "string") await api("bt/peers", { ih: m.ih, addrs }).catch(() => {});
+      break;
+    case "bt-drop": {
+      const map = S.btOffers.get(id);
+      if (map && map.delete(m.ih)) toast(`${f.nick} остановил раздачу`);
+      const x = S.bt.items.find((y) => y.ih === m.ih && y.friend === id);
+      if (x && m.why === "decline") toast(`${f.nick} не стал качать «${x.name}»`);
+      break;
+    }
+    case "bt-link-offer": {
+      if (typeof m.sdp !== "string") break;
+      const r = await api("bt/link-accept", { friend: id, sdp: m.sdp, ice: iceServers() });
+      p.send({ k: "bt-link-answer", sdp: r.sdp });
+      break;
+    }
+    case "bt-link-answer":
+      if (typeof m.sdp === "string") await api("bt/link-answer", { friend: id, sdp: m.sdp }).catch(() => {});
+      break;
+  }
+  renderBtbar();
+  btRefreshPanels();
+}
+
+// btTick: состояние передач; новые раздачи - предложить другу; соединение через Zeno
+async function btTick() {
+  let r;
+  try { r = await api("bt/list", { friends: S.friends.map((f) => f.id) }); } catch (e) { return; }
+  S.bt = r;
+  for (const x of r.items) {
+    const p = peerOf(x.friend);
+    if (x.role === "send" && x.state === "seeding" && !x.offered && p && p.connected) {
+      btOfferTo(p, x);
+      api("bt/offered", { ih: x.ih }).catch(() => {});
+    }
+  }
+  const need = new Set(r.items.filter((x) => x.state !== "error" && x.state !== "hashing" && !(x.role === "get" && x.state === "done")).map((x) => x.friend));
+  for (const id of need) {
+    if (!isConnected(id) || S.me.id > id) continue;
+    const st = r.links[id] || "none";
+    const at = S.btLinkAt.get(id) || 0;
+    const dead = ["none", "failed", "closed"].includes(st);
+    const stuck = st !== "connected" && st !== "disconnected" && Date.now() - at > 20000;
+    if ((!dead && !stuck) || Date.now() - at < 10000) continue;
+    S.btLinkAt.set(id, Date.now());
+    api("bt/link-offer", { friend: id, ice: iceServers() }).then((o) => {
+      const p = peerOf(id);
+      if (p) p.send({ k: "bt-link-offer", sdp: o.sdp });
+    }).catch((e) => console.warn("TarBitTorrent:", e));
+  }
+  renderBtbar();
+  btRefreshPanels();
+}
+
+setInterval(btTick, 2000);
+
+function btRefreshPanels() {
+  for (const fill of [...S.btPanels]) fill();
+}
+
+function btButtons(id) {
+  return h("div", { class: "bt-btns" },
+    h("button", { class: "btn primary", onclick: () => btSend(id, false) }, "Отправить файл"),
+    h("button", { class: "btn", onclick: () => btSend(id, true) }, "Папку"));
+}
+
+// btPanel - список передач с другом в окне приложений; обновляется btTick
+function btPanel(id) {
+  const box = h("div", { class: "bt-list" });
+  let drawn = false;
+  const fill = () => {
+    if (drawn && !box.isConnected) {
+      S.btPanels.delete(fill);
+      return;
+    }
+    drawn = true;
+    const f = fr(id);
+    const rows = btLine(id).pending.map((o) => h("div", { class: "bt-row" },
+      h("span", { class: "bt-dir in", html: icon("download", 16) }),
+      h("div", { class: "bt-main" }, h("div", { class: "bt-name" }, o.name), h("div", { class: "bt-sub" }, `${fmtSize(o.size)} · предлагает ${f.nick}`)),
+      h("button", { class: "btn small green", onclick: () => btAccept(id, o.ih) }, "Скачать"),
+      h("button", { class: "btn small ghost", onclick: () => btDecline(id, o.ih) }, "Отклонить")));
+    for (const x of btMine(id).sort((a, b) => b.added - a.added)) {
+      rows.push(h("div", { class: "bt-row" },
+        h("span", { class: "bt-dir " + (x.role === "send" ? "out" : "in"), html: icon(x.role === "send" ? "upload" : "download", 16) }),
+        h("div", { class: "bt-main" },
+          h("div", { class: "bt-name" }, x.name),
+          h("div", { class: "bt-sub", html: `${fmtSize(x.size)} · ` + btItemText(x).replace(/^<b>.*?<\/b> · /, "") }),
+          btBusy(x) ? h("div", { class: "bt-bar" }, h("i", { style: { width: (x.progress * 100).toFixed(1) + "%" } })) : null),
+        x.state === "error" || x.state === "hashing" ? null
+          : h("button", { class: "btn small ghost", title: "Показать в папке", html: icon("folder", 16), onclick: () => api("bt/reveal", { ih: x.ih }).catch(fail) }),
+        h("button", { class: "btn small ghost", title: x.role === "send" ? "Остановить раздачу (файл останется)" : "Убрать из списка (файлы останутся)", html: icon("x", 16), onclick: () => btRemove(id, x) })));
+    }
+    box.replaceChildren(...(rows.length ? rows : [h("div", { class: "hint" }, "Передач пока нет. Выберите файл или папку - друг получит предложение скачать.")]));
+  };
+  S.btPanels.add(fill);
+  fill();
+  return box;
+}
+
+function renderBtbar() {
+  const bar = $("#btbar");
+  if (!bar) return;
+  const id = S.view === "dm" ? S.sel : null;
+  const l = id && fr(id) ? btLine(id) : null;
+  bar.hidden = !l || !l.text;
+  if (bar.hidden) return;
+  const btns = [];
+  if (l.remote) {
+    const o = l.pending[0];
+    btns.push(h("button", { class: "btn small green", onclick: () => btAccept(id, o.ih) }, "Скачать"),
+      h("button", { class: "btn small ghost", onclick: () => btDecline(id, o.ih) }, "Отклонить"));
+  }
+  btns.push(h("button", { class: "btn small", onclick: () => openApps(id, "bt") }, "Подробнее"));
+  bar.replaceChildren(h("span", { class: "lan-ico", html: icon("download", 18) }), h("div", { class: "lb-text", html: `<b>TarBitTorrent</b> · ${l.text}` }), ...btns);
 }
 
 // nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп

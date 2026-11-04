@@ -70,6 +70,9 @@ type App struct {
 }
 
 func main() {
+	if reexecForBT() {
+		return
+	}
 	minimized := flag.Bool("minimized", false, "запуститься в трее без окна")
 	afterUpdate := flag.Int("after-update", 0, "PID старой копии после обновления")
 	lanService := flag.String("lan-service", "", "служба virtualZeno (SID владельца)")
@@ -151,6 +154,7 @@ func (a *App) Quit() {
 		close(a.quitCh)
 		a.NativeStop()
 		a.lanStop()
+		a.btStop()
 		a.window.Close()
 		if a.trayReady.Load() {
 			systray.Quit()

@@ -386,5 +386,8 @@ func (s *Server) route(path string, body M) (any, error) {
 	if strings.HasPrefix(path, "lan/") {
 		return app.lanRoute(path, body)
 	}
+	if strings.HasPrefix(path, "bt/") {
+		return app.btRoute(path, body)
+	}
 	return nil, errNotFound
 }
