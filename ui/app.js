@@ -2103,12 +2103,14 @@ function remoteScreen(p) {
 // line(id) -> { on, remote, text }: запущено у нас, запущено у друга, строка состояния
 const APPS = [
   {
-    id: "vlan", name: "virtualZeno", icon: "lan", tag: "Локальная сеть", color: "#1f8a5b",
+    id: "vlan", name: "virtualZeno", icon: "lan", tag: "Локальная сеть", color: "#157a4d",
+    art: '<svg viewBox="0 0 160 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><rect width="160" height="100" fill="#157a4d"/><path d="M0 20h160M0 40h160M0 60h160M0 80h160M20 0v100M40 0v100M60 0v100M80 0v100M100 0v100M120 0v100M140 0v100" stroke="#1f9460" stroke-width="1"/><path d="M62 44h36" stroke="#ffffff" stroke-width="2.5" stroke-dasharray="4 4"/><g stroke="#d6f8e4" stroke-width="2" stroke-linecap="round"><rect x="16" y="28" width="46" height="32" rx="4" fill="#0d3d27"/><path d="M31 67h16M39 60v7"/><rect x="98" y="28" width="46" height="32" rx="4" fill="#0d3d27"/><path d="M113 67h16M121 60v7"/></g><g font-family="Consolas, monospace" font-size="8" fill="#8ff0bd" text-anchor="middle"><text x="39" y="47">10.77.1.2</text><text x="121" y="47">10.77.9.5</text></g><circle cx="80" cy="44" r="8" fill="#ffffff"/><circle cx="80" cy="44" r="3.5" fill="#157a4d"/><path d="M60 84h40" stroke="#8ff0bd" stroke-width="2" stroke-linecap="round" opacity=".7"/></svg>',
     desc: "Локальная сеть с другом, как Hamachi: LAN-игры, общие папки и ping по адресам 10.77.x.y. Включается, когда запустили оба.",
     line: (id) => lanLine(id), start: (id) => lanStart(id), exit: (id) => lanExit(id),
   },
   {
-    id: "yaguessr", name: "ЯГессер", icon: "globe", tag: "Игра", color: "#c9822b",
+    id: "yaguessr", name: "ЯГессер", icon: "globe", tag: "Игра", color: "#c97a26",
+    art: '<svg viewBox="0 0 160 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><rect width="160" height="100" fill="#c97a26"/><path d="M-5 70c20-8 30 4 52-6s30-26 58-18 40 2 60-8v70H-5z" fill="#b56a1d"/><path d="M10 18c14-6 26-2 34 6s4 18-8 20-26 2-30-8-4-14 4-18zM110 12c12-4 30 0 34 10s-6 16-18 16-22-4-22-12 0-12 6-14z" fill="#e0a356"/><path d="M0 52c30 6 60-14 90-6s50 10 70 2M30 0c6 30-4 60 6 100M118 0c-8 34 10 62 0 100" stroke="#f3d3a4" stroke-width="1.6" fill="none" stroke-dasharray="3 4"/><g transform="translate(80 46)"><path d="M0 26C-14 10-18 2-18-8a18 18 0 0 1 36 0C18 2 14 10 0 26z" fill="#e5484d" stroke="#ffffff" stroke-width="2.5"/><circle cx="0" cy="-8" r="6.5" fill="#ffffff"/></g><ellipse cx="80" cy="74" rx="12" ry="3" fill="#8f4f12" opacity=".5"/><path d="M126 70l8 8M134 70l-8 8" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/></svg>',
     desc: "Угадай место по панораме Google или Яндекса: классика, дуэль, канат, ставки и другие режимы. Комната живет в Zeno того, кто запустил, свой сервер не нужен.",
     line: (id) => ygLine(id), start: (id) => ygStart(id), exit: () => ygClose(),
   },
@@ -2304,7 +2306,7 @@ function openApps(id) {
     grid.replaceChildren(...APPS.map((a) => {
       const st = state(a);
       return h("button", { class: "app-tile" + (a.id === pick ? " sel" : ""), onclick: () => { pick = a.id; draw(); } },
-        h("div", { class: "app-tile-art", style: { background: a.color }, html: icon(a.icon, 44) },
+        h("div", { class: "app-tile-art", style: { background: a.color }, html: a.art || icon(a.icon, 44) },
           st.badge ? h("span", { class: "app-badge " + st.cls }, st.badge) : null),
         h("div", { class: "app-tile-name" }, a.name),
         h("div", { class: "app-tile-tag" }, a.tag));
@@ -2319,11 +2321,11 @@ function openApps(id) {
       : h("button", { class: "btn " + (l.remote ? "green" : "primary"), onclick: async () => { await a.start(id); if (a.line(id).on) m.close(); } }, l.remote ? "Присоединиться" : "Запустить");
     detail.replaceChildren(
       h("div", { class: "app-detail-head" },
-        h("div", { class: "app-detail-art", style: { background: a.color }, html: icon(a.icon, 26) }),
+        h("div", { class: "app-detail-art", style: { background: a.color }, html: a.art || icon(a.icon, 26) }),
         h("div", { class: "app-detail-title" }, h("div", { class: "app-name" }, a.name), h("div", { class: "app-tile-tag" }, a.tag)),
         btn),
       h("div", { class: "app-desc" }, a.desc),
-      l.text ? h("div", { class: "app-state", html: l.text }) : null);
+      ...(l.text ? [h("div", { class: "app-state", html: l.text })] : []));
   };
   draw();
 }
