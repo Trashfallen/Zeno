@@ -1,67 +1,61 @@
 # Zeno
 
-Общаться проще, чем кажется. Голос, видео, трансляция экрана и чат на двоих напрямую между компьютерами (WebRTC, P2P). Windows, закрытая бета.
+[Русская версия](README.ru.md)
 
-## Что умеет
+Voice, video, screen sharing and chat for two people, straight between their computers (WebRTC, peer-to-peer). No server of its own. Windows, closed beta.
 
-- Автосоединение друзей: код дружбы один раз, дальше программы находят друг друга сами через зашифрованный канал пары на публичных серверах (MQTT по TCP/TLS/WebSocket и ntfy по HTTPS). Запасные пути - короткие (6 знаков) и длинные коды.
-- Шумодав на выбор: RNNoise (легкий), DeepFilterNet3 (чище, тяжелее), стандартный Chromium или выключен. «Передавать только голос»: чавканье, клавиатура и щелчки между фразами не уходят.
-- Громкость собеседника и трансляции 0-300% (правая кнопка), трансляция во весь экран, сохранение кадра, высота окна звонка тянется мышью.
-- Чат с историей (у каждого своя зашифрованная копия), «печатает», отметки доставки.
-- Голосовой звонок: шумоподавление, изоляция голоса, эхоподавление, автоусиление, шумовой гейт с авто-порогом, push-to-talk по всей системе, выбор устройств, Opus до 128 кбит/с.
-- Камера и трансляция экрана до 1440p 60 к/с со звуком системы, режимы «плавность» и «четкость», H.264 на видеокарте, статистика (кадры, битрейт, кодер, пинг).
-- Окно на WebView2, трей, автозапуск, установка из архива с ярлыками, самообновление из релизов GitHub.
-- Встроенные приложения (кнопка «Приложения» в чате, как «Активности» в Discord). virtualZeno - локальная сеть с другом, как Hamachi: адреса 10.77.x.y, ping, LAN-игры, общие папки. Включается, только если запустили оба.
-- ЯГессер (там же, в «Приложениях»): угадай место по панораме Google или Яндекса, режимы классика, дуэль, канат, ставки и другие. Комната живет в Zeno того, кто запустил; друг играет через канал данных, свой сервер не нужен.
+## Features
 
-## Как устроено
+- **Friends connect by themselves.** Exchange friend codes once. After that both apps find each other on their own through an encrypted pair channel on public servers (MQTT and ntfy). Backup ways: a short 6-character code or a long code sent through any messenger.
+- **Voice calls.** Opus up to 128 kbit/s, echo cancellation, auto gain, noise gate with an automatic threshold, system-wide push-to-talk, device selection.
+- **Noise suppression of your choice.** RNNoise (light), DeepFilterNet3, DPDFNet (cleanest and heaviest), NVIDIA Broadcast (RTX GPU, installed separately), the Chromium built-in one, or off. "Voice only" mode keeps keyboard, clicks and chewing between phrases out of the call.
+- **Camera and screen sharing.** Up to 1440p 60 fps with system audio, "smooth" and "sharp" modes, hardware H.264, live stats (frames, bitrate, encoder, ping).
+- **Chat.** History (each side keeps its own encrypted copy), typing indicator, delivery marks, files and images.
+- **Volume and view.** Friend and stream volume 0-300%, fullscreen stream, frame capture, resizable call area.
+- **Built-in apps** (the "Apps" button in chat):
+  - **virtualZeno** - a LAN with your friend, like Hamachi: 10.77.x.y addresses, ping, LAN games, shared folders. Works only while both of you run it.
+  - **YaGuessr** - guess the place from a Google or Yandex panorama: classic, duel, tug-of-war, bets and other modes. The room lives in the host's Zeno, the friend plays over the data channel.
+  - **TarBitTorrent** - send big files and folders, even 50 GB: every piece is verified, transfer resumes after a break or a restart. Only the friend sees the share; it goes directly or through Zeno when a direct link is not possible.
+- **Desktop app.** Own window, tray icon, autostart, installs itself with shortcuts, updates itself from GitHub releases.
 
-Сервера нет. Медиа и сообщения идут напрямую; адрес узнается через публичные STUN, при желании можно указать свой TURN. Первое соединение ставится обменом двумя кодами через любой мессенджер:
+## How it works
 
-1. Коды дружбы: публичный ключ участника + сертификат беты.
-2. Код-предложение и код-ответ: SDP только с каналом данных, подписанный ключом Ed25519 отправителя (в SDP лежит отпечаток DTLS, поэтому подмена собеседника невозможна), сжатый deflate со словарем - около 700 знаков.
-3. После открытия канала медиа-слоты (микрофон, камера, экран, звук экрана) добавляются пересогласованием по самому каналу.
+- There is no Zeno server. Media, messages and files go directly between the two PCs. Public STUN servers help find the address; you can add your own TURN server.
+- Each user has an Ed25519 key pair. A friend code carries the public key and the beta certificate.
+- Connection offers are signed with the sender's key. The offer contains the DTLS fingerprint, so nobody in the middle can pose as your friend.
+- The first connection opens only a data channel. Microphone, camera, screen and screen audio are added later by renegotiation over that channel.
+- virtualZeno uses the Wintun network adapter (the WireGuard driver). It needs admin rights once: Zeno asks for UAC and installs a small service that holds the adapter. Each address is derived from the public key, and packets with someone else's source address are dropped. Everything is removed in Settings -> Connection.
 
-## virtualZeno
+## Tech stack
 
-- Адаптер [Wintun](https://www.wintun.net) (драйвер WireGuard, `wintun.dll` вызывается через syscall). Работать с ним может только администратор, поэтому при первом запуске virtualZeno Zeno один раз просит UAC и ставит службу `virtualZeno` (SYSTEM, запускается с Windows): копия программы и `wintun.dll` в `Program Files\Zeno`, правило брандмауэра на входящие с 10.77.0.0/16. Убрать все - Настройки → Соединение.
-- Служба держит адаптер и гоняет пакеты в Zeno по именованному каналу `\\.\pipe\virtualZeno` (доступ только у SYSTEM, администраторов и поставившего пользователя). Адрес и маршрут есть, пока Zeno подключен и virtualZeno запущен хотя бы с одним другом.
-- Адрес выводится из публичного ключа (10.77.x.y/16), пакеты с чужим адресом отправителя отбрасываются. Между друзьями - отдельное соединение pion с каналом данных без порядка и повторов; договариваются страницы по основному каналу (`lan-state`, `lan-offer`, `lan-answer`). Широковещательные и групповые пакеты уходят всем, с кем запущен virtualZeno; у адаптера метрика 1, чтобы на него шли и пакеты на 255.255.255.255.
+- **Go** - the app itself, signaling (MQTT via paho, ntfy over HTTPS), updates, tray.
+- **WebView2** - the window; the UI is HTML/JS, calls and chat use Chromium WebRTC.
+- **pion/webrtc** - extra P2P links in Go for virtualZeno and file transfer.
+- **anacrolix/torrent** - the BitTorrent engine behind TarBitTorrent.
+- **AudioWorklet + WebAssembly** - noise suppression; DPDFNet runs in onnxruntime-web.
+- **Wintun** - the virtual network adapter for virtualZeno.
 
-## ЯГессер
+## Requirements
 
-- Движок и клиент игры - `internal/yaguessr` (из отдельного проекта YaGuessr, вход по паролю заменен на Zeno). Zeno отдает игру по `/yg/` своего локального сервера, окно игры открывается поверх чата.
-- Хост создает комнату у себя и шлет другу `yg-invite`. Окно игры гостя вместо WebSocket говорит со страницей Zeno (postMessage), та по каналу данных - со страницей хоста (`yg-open`, `yg-ws`), а страница хоста держит за гостя WebSocket к своему `/yg/ws?as=<ID>`.
-- Панорамы Google ищет Zeno хоста по плиткам покрытия, без ключа. Для Яндекса ключ JavaScript API вводится в настройках комнаты и хранится только у хоста.
+- Windows 10 or 11, x64.
+- Microsoft Edge WebView2 Runtime (built into Windows 11, usually present on Windows 10).
+- A beta login and password from the author.
 
-## Сторонний код
+## Building
 
-`ui/rnnoise-sync.js` - [RNNoise](https://github.com/xiph/rnnoise) в сборке [@jitsi/rnnoise-wasm](https://github.com/jitsi/rnnoise-wasm) 0.2.1, лицензия в `third_party/rnnoise-wasm-LICENSE.txt` (Apache-2.0).
-
-`internal/vlan/wintun/wintun.dll` - [Wintun](https://www.wintun.net) 0.14.1 (amd64) без изменений, подписан WireGuard LLC; лицензия в `third_party/wintun-LICENSE.txt`.
-
-`ui/df/` и обертка wasm в `ui/df-worklet.js` - [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) (модель `DeepFilterNet3_onnx.tar.gz` из репозитория автора) в сборке [deepfilternet3-noise-filter](https://github.com/mezonai/mezon-noise-suppression) 1.3.0, wasm сжат gzip. Лицензия Apache-2.0 или MIT, тексты в `third_party/deepfilternet-LICENSE-*.txt`.
-
-## Закрытая бета
-
-В `beta_users.json` лежат только соль и зашифрованный сертификат участника для каждого логина: пароля в репозитории и в exe нет. Сертификат подписан ключом администратора, который хранится вне репозитория.
-
-```
-go run ./tools/beta add <логин>      # новый участник, печатает пароль
-go run ./tools/beta passwd <логин>   # новый пароль
-go run ./tools/beta remove <логин>   # отозвать доступ
-go run ./tools/beta list
-```
-
-После изменения списка нужно выпустить новую версию.
-
-## Сборка и релиз
+Requires Go (version in `go.mod`).
 
 ```
-.\build.cmd                 # dist\Zeno.exe, версия из VERSION
+build.cmd        # dist\Zeno.exe
 go test ./...
 ```
 
-Релиз: поднять `VERSION`, тег `vX.Y.Z` -> GitHub Actions собирает `Zeno.exe` и архив для тестеров. Установленные копии сами предлагают обновиться.
+## Third-party components
 
-Отладка: `ZENO_HOME` - своя папка данных (можно запустить две копии на одном ПК), `ZENO_DEBUG=1` - инструменты разработчика в окне, `ZENO_PORTABLE=1` - не устанавливаться.
+- [RNNoise](https://github.com/xiph/rnnoise) 0.2, build [@shiguredo/rnnoise-wasm](https://github.com/shiguredo/rnnoise-wasm) - Apache-2.0.
+- [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet), build [deepfilternet3-noise-filter](https://github.com/mezonai/mezon-noise-suppression) - Apache-2.0 or MIT.
+- [DPDFNet](https://github.com/ceva-ip/DPDFNet)2 48 kHz model by Ceva, export from [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) - Apache-2.0.
+- [onnxruntime-web](https://github.com/microsoft/onnxruntime) 1.30.0 - MIT.
+- [Wintun](https://www.wintun.net) 0.14.1, signed by WireGuard LLC.
+
+License texts are in `third_party/`.
