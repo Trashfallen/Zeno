@@ -7,6 +7,7 @@ package nativecap
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,6 +99,9 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	}
 	se := webrtc.SettingEngine{}
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	// связь пропала: «failed» через 10 с, а не через 25 по умолчанию - страница
+	// раньше переподключит трансляцию, картинка у друга стоит меньше
+	se.SetICETimeouts(5*time.Second, 10*time.Second, 2*time.Second)
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(ir), webrtc.WithSettingEngine(se))
 	var servers []webrtc.ICEServer
 	for _, x := range ice {
@@ -133,6 +137,15 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 		s.state = st.String()
 		str := s.stream
 		s.mu.Unlock()
+		pair := ""
+		if st == webrtc.PeerConnectionStateConnected {
+			if t := tr.Sender().Transport(); t != nil {
+				if p, err := t.ICETransport().GetSelectedCandidatePair(); err == nil && p != nil {
+					pair = fmt.Sprintf(" (%s:%d -> %s:%d)", p.Local.Typ, p.Local.Port, p.Remote.Typ, p.Remote.Port)
+				}
+			}
+		}
+		Logf("Свой захват: соединение %s%s", st, pair)
 		if st == webrtc.PeerConnectionStateConnected && str != nil {
 			str.KeyFrame()
 		}
@@ -314,6 +327,9 @@ func (s *Sender) Stats() SenderStats {
 
 // Done закрывается, когда захват закончился (например, окно закрыли).
 func (s *Sender) Done() <-chan struct{} { return s.stream.Done() }
+
+// EndReason - почему захват закончился сам и пропал ли источник.
+func (s *Sender) EndReason() (string, bool) { return s.stream.EndReason() }
 
 func (s *Sender) Stop() {
 	s.mu.Lock()

@@ -2138,6 +2138,38 @@ function stopNative() {
   if (p) p.send({ k: "nscreen-stop" });
 }
 
+// restartNative: свой захват сломался посреди трансляции - поднимаем заново.
+// Третий сбой за 2 минуты (или перезапуск не удался) - дальше через браузер.
+S.nsRestarts = [];
+let nsRestarting = false;
+async function restartNative(why) {
+  const c = S.call;
+  if (nsRestarting || !c || c.state !== "active" || !S.screen || !S.nativeId) return;
+  nsRestarting = true;
+  try {
+    const p = peerOf(c.id);
+    stopNative();
+    S.nsRestarts = S.nsRestarts.filter((t) => Date.now() - t < 120000);
+    const again = S.nsRestarts.length < 2;
+    S.nsRestarts.push(Date.now());
+    api("peer/state", { friend: c.id, state: `трансляция: ${why}, ${again ? "перезапускаю свой захват" : "перехожу на браузер"}` }).catch(() => {});
+    let ok = false;
+    if (again) ok = await startNative(S.nativeId).catch(() => false);
+    if (S.call !== c || !S.screen || !p) {
+      if (ok) api("nscreen/stop").catch(() => {});
+      return;
+    }
+    S.native = ok;
+    if (!ok) {
+      await p.setTrack("screen", S.screen.getVideoTracks()[0]).catch(() => {});
+      toast("Захват через видеокарту сбоит - транслирую через браузер", "err");
+    }
+    await tuneScreen().catch(() => {});
+  } finally {
+    nsRestarting = false;
+  }
+}
+
 async function acceptNative(id, sdp) {
   closeNativeIn();
   const pc = new RTCPeerConnection({ iceServers: iceServers() });
@@ -2148,6 +2180,7 @@ async function acceptNative(id, sdp) {
     renderStage();
   };
   pc.onconnectionstatechange = () => {
+    if (S.nsIn === box) api("peer/state", { friend: id, state: "трансляция друга: " + pc.connectionState }).catch(() => {});
     if (pc.connectionState === "failed" && S.nsIn === box) {
       closeNativeIn();
       renderStage();
@@ -2821,14 +2854,20 @@ function renderBtbar() {
   bar.replaceChildren(h("span", { class: "lan-ico", html: icon("download", 18) }), h("div", { class: "lb-text", html: `<b>TarBitTorrent</b> · ${l.text}` }), ...btns);
 }
 
-// nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп
+// nativeTick: счетчики своего захвата для статистики; источник пропал (окно закрыли) - стоп;
+// упал кодер или соединение до друга - перезапуск (раньше картинка у друга просто вставала)
 async function nativeTick() {
   if (!S.native) return;
   const r = await api("nscreen/stats").catch(() => null);
   if (!r || !S.native) return;
-  if (!r.active || r.ended) {
+  if (!r.active || (r.ended && r.gone)) {
     toast("Источник трансляции закрылся", "err");
     stopScreen();
+    return;
+  }
+  const state = r.stats && r.stats.state;
+  if (r.ended || state === "failed" || state === "closed") {
+    restartNative(r.ended ? r.reason || "захват остановился" : "соединение " + state);
     return;
   }
   const now = performance.now();

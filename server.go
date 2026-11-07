@@ -49,6 +49,9 @@ func newServer(app *App) (*Server, error) {
 	}
 	s := &Server{app: app, token: hex.EncodeToString(b), ln: ln}
 	s.srv = &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
+	if logger != nil {
+		s.srv.ErrorLog = logger // паники в обработчиках net/http ловит сам и пишет сюда
+	}
 	return s, nil
 }
 

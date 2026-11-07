@@ -33,6 +33,7 @@ func init() {
 			logf("Выбор экрана: %s", s)
 		}
 	}
+	nativecap.Logf = logf
 }
 
 // ScreenSources - окна и экраны с превью для окна выбора.
@@ -183,7 +184,8 @@ func (a *App) NativeStats() any {
 		ended = true
 	default:
 	}
-	return M{"active": true, "ended": ended, "stats": st}
+	reason, gone := s.EndReason()
+	return M{"active": true, "ended": ended, "reason": reason, "gone": gone, "stats": st}
 }
 
 func (a *App) NativeStop() {

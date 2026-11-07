@@ -11,11 +11,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"fyne.io/systray"
+	"golang.org/x/sys/windows"
 )
 
 const appName = "Zeno"
@@ -50,6 +53,46 @@ func setupLogging(p Paths) {
 		return
 	}
 	logger = log.New(f, "", log.LstdFlags)
+}
+
+// crashFile держит открытым файл, подставленный вместо stderr.
+var crashFile *os.File
+
+// setupCrashLog: паника или падение рантайма Go печатает в stderr, а у
+// программы с окном его нет - вылет не оставлял следа. Рантайм на Windows
+// каждый раз берет stderr через GetStdHandle, поэтому подменяем сам дескриптор
+// процесса: так ловится и паника, и исключение внутри чужого кода (драйвер
+// видеокарты, COM) - debug.SetCrashOutput второе не пишет. При следующем
+// запуске текст переносится в zeno.log (друг присылает один файл).
+func setupCrashLog(p Paths) {
+	name := filepath.Join(p.Logs, "crash.log")
+	if b, err := os.ReadFile(name); err == nil && len(b) > 0 {
+		if len(b) > 32<<10 {
+			b = b[:32<<10]
+		}
+		what := "писал в stderr"
+		if s := string(b); strings.Contains(s, "panic:") || strings.Contains(s, "fatal error:") || strings.Contains(s, "Exception 0x") {
+			what = "упал"
+		}
+		logf("Прошлый запуск %s:\n%s", what, b)
+		_ = os.Rename(name, filepath.Join(p.Logs, "crash-"+time.Now().Format("20060102-150405")+".log"))
+		if old, _ := filepath.Glob(filepath.Join(p.Logs, "crash-*.log")); len(old) > 5 {
+			sort.Strings(old)
+			for _, f := range old[:len(old)-5] {
+				_ = os.Remove(f)
+			}
+		}
+	}
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	if err := windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(f.Fd())); err != nil {
+		logf("Журнал падений: %v", err)
+		f.Close()
+		return
+	}
+	crashFile = f
 }
 
 type App struct {
@@ -107,6 +150,7 @@ func main() {
 	}
 	setupLogging(paths)
 	logf("%s %s запускается", appName, appVersion)
+	setupCrashLog(paths)
 	os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", browserArgs)
 
 	app := &App{paths: paths, quitCh: make(chan struct{})}

@@ -48,12 +48,46 @@ type Stream struct {
 	sizeReq atomic.Uint64 // w<<32 | h
 	presReq atomic.Pointer[preset]
 
-	mu    sync.Mutex
-	stats Stats
+	mu      sync.Mutex
+	stats   Stats
+	endErr  string // почему захват закончился сам
+	srcGone bool   // закончился, потому что пропал источник (окно закрыли)
+}
+
+// EndReason - почему захват закончился сам ("" - остановили или еще идет) и
+// пропал ли источник (тогда перезапускать нечего).
+func (s *Stream) EndReason() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endErr, s.srcGone
+}
+
+func (s *Stream) fail(what string, err error) {
+	msg := what
+	if err != nil {
+		msg += ": " + err.Error()
+	}
+	s.mu.Lock()
+	s.endErr = msg
+	st := s.stats
+	s.mu.Unlock()
+	Logf("Свой захват остановился: %s (%s %dx%d, кадров %d из %d)", msg, st.Encoder, st.W, st.H, st.Frames, st.Captured)
 }
 
 // forceHDR - для проверок: путь HDR даже на обычном мониторе.
 var forceHDR bool
+
+// Logf - журнал программы: почему захват остановился, сторож кодера, соединение.
+var Logf = func(string, ...any) {}
+
+// Сторож кодера: картинка стоит - кадр все равно повторяется раз в 0,5 с, так что
+// 3 с без единого кадра из кодера значит, что он завис (не просит вход или
+// отказывает). Кодер пересоздается; если это не помогает - захват заканчивается.
+const (
+	stallAfter  = 3 * time.Second
+	stallMax    = 5 // пересозданий сторожем за stallWindow
+	stallWindow = time.Minute
+)
 
 // MonitorAt - HMONITOR монитора, на котором лежит точка.
 func MonitorAt(x, y int32) uintptr { return monitorAt(x, y) }
@@ -162,7 +196,9 @@ func (s *Stream) run(started chan<- error) {
 	fps := uint32(s.opts.FPS)
 	frameDur := time.Second / time.Duration(fps)
 	kbps := uint32(s.opts.Kbps)
+	var lastOut time.Time // последний кадр из кодера (для сторожа)
 	onOut := func(data []byte, key bool, ts int64) {
+		lastOut = time.Now()
 		s.mu.Lock()
 		s.stats.Frames++
 		s.stats.Bytes += int64(len(data))
@@ -189,6 +225,7 @@ func (s *Stream) run(started chan<- error) {
 		if enc, err = newEncoder(d, w, h, fps, kbps, onOut); err != nil {
 			return err
 		}
+		lastOut = time.Now()
 		s.mu.Lock()
 		s.stats.Encoder, s.stats.W, s.stats.H = enc.Name, int(w), int(h)
 		s.mu.Unlock()
@@ -224,11 +261,32 @@ func (s *Stream) run(started chan<- error) {
 	var fresh bool
 	var freshTS, firstTS, lastTS int64 // время захвата, единицы 100 нс
 	var lastEnc time.Time
+	var stalls []time.Time
 	for {
 		select {
 		case <-s.stop:
 			return
 		default:
+		}
+		if !lastEnc.IsZero() && time.Since(lastOut) > stallAfter {
+			now := time.Now()
+			for len(stalls) > 0 && now.Sub(stalls[0]) > stallWindow {
+				stalls = stalls[1:]
+			}
+			if len(stalls) >= stallMax {
+				s.fail("кодер зависает снова и снова", nil)
+				return
+			}
+			stalls = append(stalls, now)
+			s.mu.Lock()
+			w, h := uint32(s.stats.W), uint32(s.stats.H)
+			s.mu.Unlock()
+			Logf("Свой захват: кодер молчит %.0f с (просит вход: %v) - пересоздаю", now.Sub(lastOut).Seconds(), enc.ready())
+			if err := build(w, h); err != nil {
+				s.fail("кодер не пересоздался", err)
+				return
+			}
+			s.keyReq.Store(true)
 		}
 		_, err := c.grab(func(tex com, w, h, tw, th uint32, t int64) {
 			if conv.put(tex, w, h, tw, th) == nil {
@@ -247,9 +305,14 @@ func (s *Stream) run(started chan<- error) {
 			}
 		})
 		if err != nil {
-			return // источник пропал (окно закрыто) или устройство потеряно
+			s.mu.Lock()
+			s.srcGone = true
+			s.mu.Unlock()
+			s.fail("источник пропал или видеокарта сбросилась", err) // окно закрыто, устройство потеряно
+			return
 		}
 		if err := enc.pump(); err != nil {
+			s.fail("ошибка кодера", err)
 			return
 		}
 		if p := s.presReq.Swap(nil); p != nil {
@@ -261,7 +324,8 @@ func (s *Stream) run(started chan<- error) {
 			}
 			ow, oh = fit(int(c.size.W), int(c.size.H), p.w, p.h)
 			s.sizeReq.Store(0) // ступень от прошлого качества больше не нужна
-			if build(ow, oh) != nil {
+			if err := build(ow, oh); err != nil {
+				s.fail("смена качества", err)
 				return
 			}
 			s.mu.Lock()
@@ -269,7 +333,8 @@ func (s *Stream) run(started chan<- error) {
 			s.mu.Unlock()
 		}
 		if r := s.sizeReq.Swap(0); r != 0 {
-			if build(uint32(r>>32), uint32(r)) != nil {
+			if err := build(uint32(r>>32), uint32(r)); err != nil {
+				s.fail("смена разрешения", err)
 				return
 			}
 		}
