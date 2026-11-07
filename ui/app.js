@@ -15,8 +15,10 @@ const MEDIA_DEFAULTS = {
 };
 // шумодавы на выбор: значение, название, пояснение
 const NS_MODES = [
-  ["rnnoise", "RNNoise (рекомендуется)", "Нейросеть RNNoise убирает вентиляторы, улицу, клавиатуру и чавканье - как Krisp в Discord. Почти не грузит процессор."],
+  ["rnnoise", "RNNoise 0.2 (рекомендуется)", "Нейросеть RNNoise 0.2 убирает вентиляторы, улицу, клавиатуру и чавканье - как Krisp в Discord. Почти не грузит процессор."],
+  ["dpdf", "DPDFNet - чище всех, тяжелее всех", "Нейросеть DPDFNet (потомок DeepFilterNet): глушит шум сильнее всех и меньше всех портит голос. Занимает половину одного ядра процессора, задержка голоса больше на ~80 мс."],
   ["dfn", "DeepFilterNet3 - чище, тяжелее", "Нейросеть DeepFilterNet3: чище RNNoise, меньше «подводного» звука в голосе. Сильнее грузит процессор, задержка голоса больше на ~40 мс."],
+  ["nvidia", "NVIDIA Broadcast (видеокарта RTX)", "Шум убирает видеокарта RTX через программу NVIDIA Broadcast. Zeno сам берет ее микрофон (выбор микрофона выше не действует), свой шумодав выключает. Микрофон и эффекты настраиваются в самой NVIDIA Broadcast."],
   ["standard", "Стандартное (Chromium)", "Встроенный шумодав браузера: слабее нейросетей, зато работает с изоляцией голоса."],
   ["off", "Выключено", "Без шумодава. Так же выбирают внешний: NVIDIA Broadcast, Krisp и т.п. - выберите их микрофон выше."],
 ];
@@ -3673,6 +3675,7 @@ function secVoice() {
     if (testMic) { testMic.stop(); }
     testMic = new Mic();
     testMic.addEventListener("level", onLevel);
+    testMic.addEventListener("ns", () => syncNS());
     const t = await testMic.start(S.media);
     let a = document.getElementById("aTest");
     if (!a) {
@@ -3754,16 +3757,20 @@ function secVoice() {
   const isoRow = switchRow("Изоляция голоса", iso ? "Для стандартного шумоподавления: сильнее отделяет голос от фона." : "Недоступно в этой версии WebView2.",
     S.media.isolation && iso, (v) => setMedia({ isolation: v }), !iso || S.media.nsMode !== "standard");
   const nsSub = h("div", { class: "rs-sub" });
-  const dfnRow = h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Сила DeepFilterNet"),
+  const dfnRow = h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Сила шумодава"),
     h("div", { class: "rs-sub" }, "Насколько глушить шум. Меньше - фон слышен чуть-чуть, зато голос естественнее.")),
     rangeRow(10, 100, S.media.dfnLevel, (v) => v + " дБ", (v) => setMedia({ dfnLevel: v })));
   const syncNS = () => {
     const m = S.media.nsMode;
-    const err = m === "dfn" && (mic.dfnError || (testMic && testMic.dfnError));
-    nsSub.textContent = err ? "DeepFilterNet не запустился, вместо него работает RNNoise: " + err : NS_MODES.find(([v]) => v === m)?.[2] || "";
-    dfnRow.style.display = m === "dfn" ? "" : "none";
+    const err = (m === "dfn" || m === "dpdf") && (mic.dfnError || (testMic && testMic.dfnError));
+    const noBC = m === "nvidia" && (mic.live ? mic.nvidiaMissing : testMic && testMic.nvidiaMissing);
+    nsSub.textContent = err ? (m === "dpdf" ? "DPDFNet" : "DeepFilterNet") + " не запустился, вместо него работает RNNoise: " + err
+      : noBC ? "Не найден микрофон «NVIDIA Broadcast»: установите NVIDIA Broadcast с сайта nvidia.com и включите в ней удаление шума. Пока работает RNNoise."
+      : NS_MODES.find(([v]) => v === m)?.[2] || "";
+    dfnRow.style.display = m === "dfn" || m === "dpdf" ? "" : "none";
   };
   syncNS();
+  mic.addEventListener("ns", syncNS);
   const camBox = h("div", { class: "cam-preview" }, "Камера выключена");
   const camBtn = h("button", { class: "btn small", onclick: async () => {
     if (camTest) {
@@ -3802,7 +3809,7 @@ function secVoice() {
     h("h3", {}, "Обработка голоса"),
     h("div", { class: "row-set" }, h("div", { class: "rs-text" }, h("div", { class: "rs-title" }, "Шумоподавление"), nsSub),
       selectEl(NS_MODES.map(([v, l]) => [v, l]), S.media.nsMode, (v) => {
-        setMedia({ nsMode: v });
+        setMedia({ nsMode: v }, () => testMic && startTest());
         isoRow.querySelector("input").disabled = !iso || v !== "standard";
         syncNS();
       })),

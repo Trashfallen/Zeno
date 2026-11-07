@@ -2,17 +2,22 @@
 //
 // Цепочка микрофона: захват с обработкой Chromium (эхоподавление,
 // автоусиление, стандартный шумодав и изоляция голоса - что включено)
-// -> громкость ввода -> [DeepFilterNet3 (df-worklet.js), в режиме dfn]
+// -> громкость ввода -> [DeepFilterNet3 (df-worklet.js) в режиме dfn,
+//    DPDFNet (dpdf-worklet.js + dpdf-worker.js) в режиме dpdf]
 // -> RNNoise и отсечка «не голоса» (voice-worklet.js)
 // -> выключатель (микрофон выкл / push-to-talk) -> дорожка, которая уходит другу.
 //
-// В режиме dfn шум убирает DeepFilterNet, а RNNoise только оценивает, голос ли это.
+// В режимах dfn и dpdf шум убирает своя нейросеть, а RNNoise только оценивает, голос ли это.
+//
+// В режиме nvidia шум убирает видеокарта: вместо выбранного микрофона берется
+// виртуальный «NVIDIA Broadcast» (программа NVIDIA ставится отдельно), свой
+// шумодав выключен. Нет такого микрофона - работает RNNoise.
 
 export const VOICE_DEFAULTS = {
   input: "default", output: "default", camera: "default",
   inputVolume: 100, outputVolume: 100,
-  nsMode: "rnnoise", // rnnoise (нейросеть, как Krisp) | dfn (DeepFilterNet3, чище и тяжелее) | standard (Chromium) | off
-  dfnLevel: 100, // DeepFilterNet: на сколько дБ максимум глушить шум
+  nsMode: "rnnoise", // rnnoise (RNNoise 0.2) | dfn (DeepFilterNet3) | dpdf (DPDFNet, чище всех, тяжелее всех) | nvidia (NVIDIA Broadcast) | standard (Chromium) | off
+  dfnLevel: 100, // DeepFilterNet и DPDFNet: на сколько дБ максимум глушить шум
   vad: true, // передавать только голос
   isolation: true, ec: true, agc: true,
   gate: true, gateAuto: true, threshold: -50,
@@ -39,6 +44,14 @@ function loadDFN() {
     dfnAssets.catch(() => { dfnAssets = null; });
   }
   return dfnAssets;
+}
+
+// микрофон NVIDIA Broadcast (виртуальный, появляется после установки программы)
+export async function findBroadcastMic() {
+  try {
+    const list = await navigator.mediaDevices.enumerateDevices();
+    return list.find((d) => d.kind === "audioinput" && d.deviceId !== "default" && d.deviceId !== "communications" && /nvidia broadcast/i.test(d.label)) || null;
+  } catch (e) { return null; }
 }
 
 export function supportsVoiceIsolation() {
@@ -77,6 +90,12 @@ export class Mic extends EventTarget {
     const audio = { echoCancellation: cfg.ec, noiseSuppression: standard, autoGainControl: cfg.agc, channelCount: 1, sampleRate: 48000 };
     if (supportsVoiceIsolation()) audio.voiceIsolation = standard && cfg.isolation;
     if (cfg.input && cfg.input !== "default") audio.deviceId = { exact: cfg.input };
+    this.nvidiaMissing = false;
+    if (cfg.nsMode === "nvidia") {
+      const bc = await findBroadcastMic();
+      if (bc) audio.deviceId = { exact: bc.deviceId };
+      else this.nvidiaMissing = true;
+    }
     try {
       this.raw = await navigator.mediaDevices.getUserMedia({ audio });
     } catch (e) {
@@ -95,9 +114,11 @@ export class Mic extends EventTarget {
     this.dfn = null;
     this.dfnError = "";
     if (cfg.nsMode === "dfn") await this._startDFN(cfg);
+    if (cfg.nsMode === "dpdf") await this._startDPDF(cfg);
     src.connect(this.gain);
     (this.dfn ? this.gain.connect(this.dfn) : this.gain).connect(this.gate).connect(this.out).connect(this.dest);
     this.gate.port.onmessage = (e) => {
+      if (e.data.ready) return;
       if (e.data.error) {
         console.warn("RNNoise не загрузился:", e.data.error);
         this.rnnoiseError = e.data.error;
@@ -113,6 +134,7 @@ export class Mic extends EventTarget {
     this.cfgKey = Mic.captureKey(cfg);
     this.apply(cfg);
     if (this.ctx.state !== "running") await this.ctx.resume().catch(() => {});
+    this.dispatchEvent(new Event("ns")); // настройки показывают, что вышло с шумодавом
     return this.track;
   }
 
@@ -131,11 +153,47 @@ export class Mic extends EventTarget {
         console.warn("DeepFilterNet не запустился:", e.data.error);
         this.dfnError = e.data.error;
         if (this.cfg) this.apply(this.cfg);
+        this.dispatchEvent(new Event("ns"));
       };
     } catch (e) {
       console.warn("DeepFilterNet не загрузился:", e);
       this.dfnError = String(e);
       this.dfn = null;
+    }
+  }
+
+  // _startDPDF ставит DPDFNet: модель считает отдельный поток (dpdf-worker.js),
+  // аудиопоток (dpdf-worklet.js) только передает кадры. Ошибки пишутся в
+  // dfnError - для интерфейса это тот же «не запустился, работает RNNoise».
+  async _startDPDF(cfg) {
+    const ctx = this.ctx;
+    try {
+      await ctx.audioWorklet.addModule("dpdf-worklet.js");
+      const w = new Worker("dpdf-worker.js", { type: "module" });
+      this.dpdfWorker = w;
+      const ch = new MessageChannel();
+      const ready = await new Promise((res) => {
+        const t = setTimeout(() => res({ error: "модель не загрузилась за 20 с" }), 20000);
+        w.onmessage = (e) => { if (e.data.ready || e.data.error) { clearTimeout(t); res(e.data); } };
+        w.onerror = (e) => { clearTimeout(t); res({ error: e.message || "ошибка потока" }); };
+        w.postMessage({ port: ch.port2, level: cfg.dfnLevel }, [ch.port2]);
+      });
+      if (ready.error) throw new Error(ready.error);
+      w.onmessage = (e) => {
+        if (!e.data.error) return;
+        console.warn("DPDFNet:", e.data.error);
+        this.dfnError = e.data.error;
+        if (this.dfn) this.dfn.port.postMessage({ bypass: true });
+        if (this.cfg) this.apply(this.cfg);
+        this.dispatchEvent(new Event("ns"));
+      };
+      this.dfn = new AudioWorkletNode(ctx, "zeno-dpdf", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      this.dfn.port.postMessage({ port: ch.port1 }, [ch.port1]);
+    } catch (e) {
+      console.warn("DPDFNet не запустился:", e);
+      this.dfnError = String(e.message || e);
+      if (this.dpdfWorker) this.dpdfWorker.terminate();
+      this.dpdfWorker = this.dfn = null;
     }
   }
 
@@ -146,12 +204,13 @@ export class Mic extends EventTarget {
     this.gain.gain.value = Math.max(0, cfg.inputVolume) / 100;
     this.ptt = cfg.mode === "ptt";
     if (this.dfn) this.dfn.port.postMessage({ level: cfg.dfnLevel });
+    if (this.dpdfWorker) this.dpdfWorker.postMessage({ level: cfg.dfnLevel });
     const dfnOK = !!this.dfn && !this.dfnError;
     this.gate.port.postMessage({
       enabled: cfg.gate && !this.ptt,
       mode: this.ptt ? "open" : (cfg.gateAuto ? "auto" : "manual"),
       threshold: cfg.threshold,
-      denoise: cfg.nsMode === "rnnoise" || (cfg.nsMode === "dfn" && !dfnOK),
+      denoise: cfg.nsMode === "rnnoise" || ((cfg.nsMode === "dfn" || cfg.nsMode === "dpdf") && !dfnOK) || (cfg.nsMode === "nvidia" && this.nvidiaMissing),
       vad: cfg.vad && !this.ptt,
     });
     this._updateOut();
@@ -169,7 +228,8 @@ export class Mic extends EventTarget {
     if (this.raw) this.raw.getTracks().forEach((t) => t.stop());
     if (this.track) this.track.stop();
     if (this.ctx) this.ctx.close().catch(() => {});
-    this.raw = this.track = this.ctx = this.dfn = null;
+    if (this.dpdfWorker) this.dpdfWorker.terminate();
+    this.raw = this.track = this.ctx = this.dfn = this.dpdfWorker = null;
     this.gateOpen = false;
     this.level = -120;
   }
