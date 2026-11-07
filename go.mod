@@ -97,3 +97,6 @@ require (
 	modernc.org/sqlite v1.21.1 // indirect
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
+
+// GCC with a fix for application-limited senders (static screen), see third_party/pion-interceptor/ZENO-PATCH.md
+replace github.com/pion/interceptor => ./third_party/pion-interceptor
