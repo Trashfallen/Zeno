@@ -886,9 +886,20 @@ input.addEventListener("paste", (e) => {
 
 // S.stunAuto - выбор программы: только серверы, видящие настоящий адрес (мимо VPN)
 S.stunAuto = null;
+// первый ответ net/stun: программа отдает его после проверки серверов. До него
+// соединение не начинается - иначе браузер берет запасной список с зарубежным
+// STUN и через VPN звонок идет через VPN-сервер.
+S.stunReady = null;
 
-async function refreshStun() {
-  try { S.stunAuto = await api("net/stun"); } catch (e) { /* остается прежний */ }
+function refreshStun() {
+  const p = api("net/stun").then((r) => { S.stunAuto = r; }, () => { /* остается прежний */ });
+  if (!S.stunReady) S.stunReady = p;
+  return p;
+}
+
+function stunReady() {
+  if (!S.stunReady) refreshStun();
+  return Promise.race([S.stunReady, new Promise((ok) => setTimeout(ok, 25000))]);
 }
 
 function iceServers() {
@@ -904,7 +915,7 @@ function iceServers() {
 function getPeer(id) {
   let p = peerOf(id);
   if (p) return p;
-  p = new Peer(fr(id), { iceServers, voiceKbps: () => S.media.voiceKbps, codec: () => S.media.codec });
+  p = new Peer(fr(id), { iceServers, stunReady, voiceKbps: () => S.media.voiceKbps, codec: () => S.media.codec });
   p.addEventListener("state", (e) => onPeerState(id, e.detail));
   p.addEventListener("message", (e) => onPeerMessage(id, e.detail).catch(fail));
   p.addEventListener("binary", (e) => onPeerBinary(id, e.detail));

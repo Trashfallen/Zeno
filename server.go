@@ -232,6 +232,7 @@ func (s *Server) route(path string, body M) (any, error) {
 		app.NativeStop()
 		return nil, nil
 	case "net/stun":
+		app.stun.Wait(20 * time.Second)
 		return app.stun.Info(), nil
 	case "ring":
 		on, _ := body["on"].(bool)

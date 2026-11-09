@@ -29,15 +29,21 @@ type StunInfo struct {
 }
 
 type StunPicker struct {
-	mu   sync.Mutex
-	info StunInfo
+	mu    sync.Mutex
+	info  StunInfo
+	ready chan struct{} // закрывается после первой проверки
 }
 
 func newStunPicker(quit <-chan struct{}) *StunPicker {
-	p := &StunPicker{}
+	p := &StunPicker{ready: make(chan struct{})}
 	go func() {
+		first := true
 		for {
 			p.refresh()
+			if first {
+				first = false
+				close(p.ready)
+			}
 			select {
 			case <-quit:
 				return
@@ -46,6 +52,15 @@ func newStunPicker(quit <-chan struct{}) *StunPicker {
 		}
 	}()
 	return p
+}
+
+// Wait - ждет первую проверку не дольше d. Без нее браузер взял бы запасной
+// список с зарубежным STUN, и через VPN соединение пошло бы через VPN-сервер.
+func (p *StunPicker) Wait(d time.Duration) {
+	select {
+	case <-p.ready:
+	case <-time.After(d):
+	}
 }
 
 func (p *StunPicker) Info() StunInfo {

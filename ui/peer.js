@@ -96,7 +96,7 @@ export function tuneSDP(sdp, voiceKbps) {
 }
 
 export class Peer extends EventTarget {
-  // opts: { iceServers(), voiceKbps(), codec() }
+  // opts: { iceServers(), stunReady(), voiceKbps(), codec() }
   constructor(friend, opts) {
     super();
     this.friend = friend;
@@ -142,6 +142,7 @@ export class Peer extends EventTarget {
   // ---------- коды ----------
 
   async makeOffer() {
+    if (this.opts.stunReady) await this.opts.stunReady();
     this.close(true);
     this.role = "offerer";
     const pc = this._newPC();
@@ -155,6 +156,7 @@ export class Peer extends EventTarget {
   }
 
   async acceptOffer(inv) {
+    if (this.opts.stunReady) await this.opts.stunReady();
     this.close(true);
     this.role = "answerer";
     const pc = this._newPC();
