@@ -304,6 +304,9 @@ func (e *encoder) pump() error {
 		if err := hr(r); err != nil {
 			return err
 		}
+		if ev == nil { // успех без события - не разыменовывать
+			return nil
+		}
 		evt := com{ev}
 		var typ uint32
 		evt.call(33, uintptr(unsafe.Pointer(&typ))) // GetType

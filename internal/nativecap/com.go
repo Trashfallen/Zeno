@@ -17,6 +17,12 @@ import (
 // com - указатель на COM-объект (первое поле объекта - таблица методов).
 type com struct{ p unsafe.Pointer }
 
+// uintptrescapes: аргументы - часто uintptr(unsafe.Pointer(&x)) из вызывающей
+// функции. Без директивы x живет на стеке горутины, стек может переехать
+// до вызова, и Windows пишет результат в старое место (x остается nil -
+// падение в encoder.pump, 0.7.2-0.7.3).
+//
+//go:uintptrescapes
 func (o com) call(i int, args ...uintptr) uintptr {
 	vtbl := *(**[128]uintptr)(o.p)
 	r, _, _ := syscall.SyscallN(vtbl[i], append([]uintptr{uintptr(o.p)}, args...)...)

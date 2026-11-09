@@ -45,6 +45,12 @@ const (
 )
 
 // comCall вызывает метод n COM-объекта obj (первый аргумент - сам объект).
+// uintptrescapes: аргументы - часто uintptr(unsafe.Pointer(&x)) из вызывающей
+// функции. Без директивы x живет на стеке горутины, стек может переехать
+// до вызова, и Windows пишет результат в старое место (x остается nil -
+// падение в encoder.pump, 0.7.2-0.7.3).
+//
+//go:uintptrescapes
 func comCall(obj unsafe.Pointer, n int, args ...uintptr) uintptr {
 	vtbl := *(*unsafe.Pointer)(obj)
 	fn := *(*uintptr)(unsafe.Add(vtbl, uintptr(n)*unsafe.Sizeof(uintptr(0))))
