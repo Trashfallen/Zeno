@@ -26,6 +26,7 @@ var (
 
 	procShowWindow            = modUser32.NewProc("ShowWindow")
 	procIsIconic              = modUser32.NewProc("IsIconic")
+	procIsZoomed              = modUser32.NewProc("IsZoomed")
 	procIsWindowVisible       = modUser32.NewProc("IsWindowVisible")
 	procGetForegroundWindow   = modUser32.NewProc("GetForegroundWindow")
 	procSetForegroundWindow   = modUser32.NewProc("SetForegroundWindow")
@@ -244,6 +245,7 @@ func (win *Window) SetFullscreen(on bool) {
 	}
 	const gwlStyle = ^uintptr(15) // -16
 	const wsOverlapped = 0x00CF0000
+	const wsMaximize = 0x01000000
 	const swpFrameChanged, swpNoOwnerZ, swpNoZOrder = 0x0020, 0x0200, 0x0004
 	win.mu.Lock()
 	defer win.mu.Unlock()
@@ -264,14 +266,25 @@ func (win *Window) SetFullscreen(on bool) {
 			return
 		}
 		win.full = st
-		procSetWindowLongPtrW.Call(h, gwlStyle, st.style&^wsOverlapped)
+		// Развернутое окно сначала восстанавливаем (как Chromium). Иначе Windows
+		// считает его развернутым: панель задач остается поверх и закрывает низ
+		// сцены, а на выходе SetWindowPlacement «развернуть» ничего не делает -
+		// окно остается размером с монитор и низ уходит под панель задач.
+		if r, _, _ := procIsZoomed.Call(h); r != 0 {
+			procShowWindow.Call(h, swRestore)
+		}
+		// флаг WS_MAXIMIZE из сохраненного стиля не возвращаем: с ним окно снова
+		// «развернутое», хоть и на весь монитор
+		procSetWindowLongPtrW.Call(h, gwlStyle, st.style&^(wsOverlapped|wsMaximize))
 		m := mi.Monitor
 		procSetWindowPos.Call(h, 0, uintptr(m.Left), uintptr(m.Top), uintptr(m.Right-m.Left), uintptr(m.Bottom-m.Top),
 			swpFrameChanged|swpNoOwnerZ)
 	} else if !on && win.full != nil {
 		st := win.full
 		win.full = nil
-		procSetWindowLongPtrW.Call(h, gwlStyle, st.style)
+		// развернуть обратно должен SetWindowPlacement; с флагом WS_MAXIMIZE он
+		// считает окно уже развернутым и оставляет размер монитора
+		procSetWindowLongPtrW.Call(h, gwlStyle, st.style&^wsMaximize)
 		procSetWindowPlacement.Call(h, uintptr(unsafe.Pointer(&st.place)))
 		procSetWindowPos.Call(h, 0, 0, 0, 0, 0, swpFrameChanged|swpNoOwnerZ|swpNoZOrder|0x0001|0x0002) // NOSIZE|NOMOVE
 	}
