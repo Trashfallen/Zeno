@@ -2108,7 +2108,7 @@ S.nsStats = null;
 
 async function startNative(id) {
   const pr = SCREEN_PRESETS[S.media.screenPreset] || SCREEN_PRESETS["1080p60"];
-  const r = await api("nscreen/start", { id, w: pr.w, h: pr.h, fps: pr.fps, kbps: pr.kbps, ice: iceServers() });
+  const r = await api("nscreen/start", { id, w: pr.w, h: pr.h, fps: pr.fps, kbps: pr.kbps, mode: S.media.screenMode, ice: iceServers() });
   const p = S.call && peerOf(S.call.id);
   if (!p) {
     api("nscreen/stop").catch(() => {});
@@ -2944,7 +2944,7 @@ async function tuneScreen(keepStep) {
   v.contentHint = motion ? "motion" : "detail";
   if (S.native) {
     // картинку шлет программа: разрешение, частота и битрейт меняются сразу, без перезапуска трансляции
-    await api("nscreen/quality", { w: pr.w, h: pr.h, fps: pr.fps, kbps: pr.kbps }).catch(() => {});
+    await api("nscreen/quality", { w: pr.w, h: pr.h, fps: pr.fps, kbps: pr.kbps, mode: S.media.screenMode }).catch(() => {});
     if (S.screen.getAudioTracks().length && S.media.screenAudio) await p.tuneSender("sys", { maxBitrate: 128000 });
     return;
   }
@@ -3518,6 +3518,7 @@ async function statsTick() {
     const l = [`${n.st.W}×${n.st.H}  ${Math.round(n.fps)} к/с`, `${mbps(n.bits)}  H264 (кодер ${(n.st.kbps / 1000).toFixed(1)} Мбит/с)`,
       `канал до друга: ~${(n.st.target / 1000).toFixed(1)} Мбит/с`, `захват: ${Math.round(n.cap)} к/с`, "кодер: " + (n.st.Encoder || "?") + " (видеокарта)"];
     if (n.st.BaseW && n.st.W < n.st.BaseW) l.push(`узкий канал: разрешение снижено с ${n.st.BaseW}×${n.st.BaseH}`);
+    if (n.st.BaseFPS && n.st.FPS < n.st.BaseFPS) l.push(`узкий канал: частота снижена с ${n.st.BaseFPS} до ${n.st.FPS} к/с`);
     if (n.st.HDR) l.push(`HDR у источника: переводится в обычный (белый ${Math.round(n.st.WhiteNit)} нит)`);
     if (n.st.Skipped) l.push("пропущено (кодер занят): " + n.st.Skipped);
     l.push("соединение: " + ({ connected: "есть", connecting: "устанавливается", new: "ждет друга", failed: "не удалось", disconnected: "прервано" }[n.st.state] || n.st.state));

@@ -37,9 +37,15 @@ type FeedbackAdapter struct {
 	referenceTimeInitialized bool
 }
 
+// Zeno: pion keeps 250 sent packets - about 150 ms at 16 Mbit/s. Once the
+// path queue grew past ~100 ms (that is, under congestion) feedback named
+// packets already forgotten, GCC got no acknowledgments at all and kept
+// sending at full rate. 8192 packets is over 3 s at 25 Mbit/s.
+const feedbackHistorySize = 8192
+
 // NewFeedbackAdapter returns a new FeedbackAdapter.
 func NewFeedbackAdapter() *FeedbackAdapter {
-	return &FeedbackAdapter{history: newFeedbackHistory(250)}
+	return &FeedbackAdapter{history: newFeedbackHistory(feedbackHistorySize)}
 }
 
 func (f *FeedbackAdapter) onSentRFC8888(ts time.Time, header *rtp.Header, size int) error {

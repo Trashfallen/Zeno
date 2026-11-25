@@ -71,7 +71,13 @@ func newDelayController(delayConfig delayControllerConfig, loggerFactory logging
 		},
 	)
 	delayController.rateController = rateController
-	overuseDetector := newOveruseDetector(newAdaptiveThreshold(), 10*time.Millisecond, rateController.onDelayStats)
+	// Zeno: 10 ms in pion - every Wi-Fi hiccup counted as overuse. Only a
+	// delay growth that lasts is congestion.
+	overuseTime := 10 * time.Millisecond
+	if zenoTuned {
+		overuseTime = 100 * time.Millisecond
+	}
+	overuseDetector := newOveruseDetector(newAdaptiveThreshold(), overuseTime, rateController.onDelayStats)
 	slopeEstimator := newSlopeEstimator(newKalman(), overuseDetector.onDelayStats)
 	arrivalGroupAccumulator := newArrivalGroupAccumulator()
 
@@ -98,6 +104,9 @@ func (d *delayController) updateDelayEstimate(acks []cc.Acknowledgment) {
 	d.ackPipe <- acks
 	d.ackRatePipe <- acks
 }
+
+// updateLoss (Zeno): the rate controller confirms congestion with loss.
+func (d *delayController) updateLoss(loss float64) { d.rateController.updateLoss(loss) }
 
 func (d *delayController) Close() error {
 	defer d.wg.Wait()

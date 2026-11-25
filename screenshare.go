@@ -126,7 +126,7 @@ func (a *App) NativeStart(body M) (any, error) {
 		return nil, errors.New("источник пропал, откройте список заново")
 	}
 	num := func(k string) int { v, _ := body[k].(float64); return int(v) }
-	o := nativecap.Options{W: num("w"), H: num("h"), FPS: num("fps"), Kbps: num("kbps"), Cursor: true}
+	o := nativecap.Options{W: num("w"), H: num("h"), FPS: num("fps"), Kbps: num("kbps"), Cursor: true, Detail: str(body, "mode") == "detail"}
 	hwnd, x, y := src.Target()
 	if hwnd != 0 {
 		o.Window = hwnd
@@ -144,7 +144,7 @@ func (a *App) NativeStart(body M) (any, error) {
 		return nil, err
 	}
 	st := snd.Stats()
-	logf("Свой захват %q: %s, %dx%d, %d к/с, %d кбит/с", src.Name, st.Encoder, st.W, st.H, o.FPS, o.Kbps)
+	logf("Свой захват %q: %s, %dx%d, %d к/с, %d кбит/с, режим %s", src.Name, st.Encoder, st.W, st.H, o.FPS, o.Kbps, map[bool]string{true: "четкость", false: "плавность"}[o.Detail])
 	nativeMu.Lock()
 	native = snd
 	nativeMu.Unlock()
@@ -165,10 +165,11 @@ func (a *App) NativeAnswer(sdp string) error {
 	return s.SetAnswer(sdp)
 }
 
-// NativeQuality - смена качества во время своего захвата: размер, частота, битрейт.
-func (a *App) NativeQuality(w, h, fps, kbps int) {
+// NativeQuality - смена качества во время своего захвата: размер, частота,
+// битрейт и режим (detail - «Четкость»).
+func (a *App) NativeQuality(w, h, fps, kbps int, detail bool) {
 	if s := nativeSender(); s != nil {
-		s.SetQuality(w, h, fps, kbps)
+		s.SetQuality(w, h, fps, kbps, detail)
 	}
 }
 

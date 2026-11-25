@@ -30,15 +30,23 @@ type Sender struct {
 	maxKbps int
 
 	ladderReset atomic.Bool
+	est         cc.BandwidthEstimator
 
 	mu      sync.Mutex
 	fps     int
+	detail  bool   // «Четкость»: ступени сначала по частоте
 	preset  [3]int // w, h, fps выбранного качества
 	kbps    int    // битрейт кодера сейчас
 	target  int    // оценка канала (GCC), кбит/с
 	rtpBase uint32
 	state   string
 	closed  bool
+
+	// для журнала: заметные падения и восстановления оценки канала
+	peak, peakLogged int
+	peakAt, dropLog  time.Time
+	dropsQuiet       int
+	recovLogged      int
 }
 
 // SenderStats - для статистики в окне трансляции.
@@ -113,7 +121,7 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	s := &Sender{pc: pc, maxKbps: o.Kbps, kbps: startKbps, target: startKbps, fps: o.FPS, state: "new"}
+	s := &Sender{pc: pc, maxKbps: o.Kbps, kbps: startKbps, target: startKbps, fps: o.FPS, detail: o.Detail, state: "new"}
 	if s.fps <= 0 {
 		s.fps = 60
 	}
@@ -160,6 +168,7 @@ func NewSender(o Options, ice []ICEServer) (*Sender, string, error) {
 	go s.readRTCP(tr.Sender())
 	select {
 	case est := <-estCh:
+		s.est = est
 		est.OnTargetBitrateChange(s.onTarget)
 	default:
 	}
@@ -225,67 +234,164 @@ func (s *Sender) onTarget(bps int) {
 		s.kbps = k
 		s.stream.SetBitrate(k)
 	}
+	s.logTarget(time.Now())
 }
 
-// Ступени разрешения от выбранного пользователем: при узком канале лучше
-// меньше пикселей, чем квадраты. Мера - бит на пиксель кадра. Держимся как
-// можно ближе к выбранному: спускаемся мелкими шагами и только когда совсем
-// мало бит, поднимаемся быстро. Ниже 720p (по рамке 1280x720) не опускаемся.
-var ladderSteps = []float64{1, 0.9, 0.8, 0.7, 0.6, 0.5}
+// logTarget пишет в журнал заметные падения оценки канала (с причиной) и
+// быстрые восстановления - по журналу видно, почему падало качество.
+// Падения - не чаще раза в 10 с, остальные считаются и попадают в следующую строку.
+func (s *Sender) logTarget(now time.Time) {
+	t := min(s.target, maxKbps)
+	if t >= s.peak || now.Sub(s.peakAt) > 5*time.Second {
+		s.peak, s.peakAt = t, now
+	}
+	if s.est == nil || s.peak == 0 {
+		return
+	}
+	st := s.est.GetStats()
+	num := func(k string) float64 {
+		switch v := st[k].(type) {
+		case int:
+			return float64(v)
+		case int64:
+			return float64(v)
+		case float64:
+			return v
+		}
+		return 0
+	}
+	if t < s.peak*4/5 && s.peak >= 2*minKbps {
+		if now.Sub(s.dropLog) < 10*time.Second {
+			s.dropsQuiet++
+			return
+		}
+		why := map[string]string{"delay": "скачок задержки", "delay+loss": "задержка и потери", "delay+rtt": "растет пинг"}[fmt.Sprint(st["lastCut"])]
+		if lt, dt := num("lossTargetBitrate"), num("delayTargetBitrate"); lt > 0 && lt < dt {
+			why = "потери"
+		}
+		if why == "" {
+			why = "?"
+		}
+		more := ""
+		if s.dropsQuiet > 0 {
+			more = fmt.Sprintf(", еще снижений до этого: %d", s.dropsQuiet)
+		}
+		Logf("Свой захват: канал до друга %.1f -> %.1f Мбит/с (%s, потери %.1f%%, пинг %.0f мс%s)",
+			float64(s.peak)/1000, float64(t)/1000, why, num("averageLoss")*100, num("rtt"), more)
+		s.dropLog, s.dropsQuiet, s.peakLogged = now, 0, s.peak
+		s.peak, s.peakAt = t, now
+		return
+	}
+	if r := int(num("recoveries")); r > s.recovLogged {
+		s.recovLogged = r
+		Logf("Свой захват: канал восстановлен до %.1f Мбит/с (до падения было %.1f)", float64(t)/1000, float64(s.peakLogged)/1000)
+	}
+}
+
+// Ступени при узком канале: при нехватке бит лучше меньше пикселей или
+// кадров, чем квадраты. Мера - бит на пиксель кадра. Вниз - только по
+// средней оценке за ladderAvg секунд и только если бит мало downSecs
+// подряд (короткий провал канала качество не трогает). Вверх - по текущей
+// оценке, быстро. Ниже 720p (по рамке 1280x720) не опускаемся.
+// «Плавность» держит частоту и снижает размер, «Четкость» держит размер
+// и сначала снижает частоту (60 -> 48 -> 40), потом размер.
+type rung struct{ k, f float64 } // доля размера, доля частоты
+
+var (
+	motionRungs = []rung{{1, 1}, {0.9, 1}, {0.8, 1}, {0.7, 1}, {0.6, 1}, {0.5, 1}}
+	detailRungs = []rung{{1, 1}, {1, 0.8}, {1, 0.67}, {0.9, 0.67}, {0.8, 0.67}, {0.7, 0.67}, {0.6, 0.67}, {0.5, 0.67}}
+)
 
 const (
-	bppLow   = 0.03 // ниже - ступень вниз (4 с подряд)
-	bppHigh  = 0.05 // на ступень выше хватает - ступень вверх (4 с подряд)
-	downSecs = 4
-	upSecs   = 4
+	bppLow    = 0.02  // ниже - ступень вниз (по средней за ladderAvg, downSecs подряд)
+	bppHigh   = 0.035 // на ступень выше хватает - ступень вверх (upSecs подряд)
+	ladderAvg = 8
+	downSecs  = 4
+	upSecs    = 4
 )
+
+func (r rung) fps(base int) int { return max(1, int(float64(base)*r.f+0.5)) }
+
+// ladderStep решает, куда сдвинуться со ступени step. avg - средний битрейт
+// кодера за ladderAvg с, now - текущий, low/high - сколько секунд подряд бит
+// мало для этой ступени / хватает на ступень выше (обновляются).
+func ladderStep(rungs []rung, step int, baseW, baseH, fps int, avg, now float64, low, high *int) int {
+	bpp := func(r rung, kbps float64) float64 {
+		w, h := float64(baseW)*r.k, float64(baseH)*r.k
+		return kbps * 1000 / (w * h * float64(r.fps(fps)))
+	}
+	if bpp(rungs[step], avg) < bppLow && step+1 < len(rungs) && !below720(baseW, baseH, rungs[step+1].k) {
+		*low++
+	} else {
+		*low = 0
+	}
+	if step > 0 && bpp(rungs[step-1], now) > bppHigh {
+		*high++
+	} else {
+		*high = 0
+	}
+	switch {
+	case *low >= downSecs:
+		*low, *high = 0, 0
+		return step + 1
+	case *high >= upSecs:
+		*low, *high = 0, 0
+		return step - 1
+	}
+	return step
+}
 
 func (s *Sender) ladder() {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	step, low, high := 0, 0, 0
+	var hist []float64 // битрейт кодера по секундам, для средней
+	var detail bool
 	for {
 		select {
 		case <-s.stream.Done():
 			return
 		case <-t.C:
 		}
-		if s.ladderReset.Swap(false) {
-			step, low, high = 0, 0, 0
-		}
 		st := s.stream.Stats()
 		s.mu.Lock()
-		kbps, fps := s.kbps, s.fps
+		kbps, fps, det, target := s.kbps, s.fps, s.detail, s.target
 		s.mu.Unlock()
+		if reset := s.ladderReset.Swap(false); reset || det != detail {
+			// новое качество кодер и так берет целиком; при смене только режима
+			// возвращаем полную ступень сами
+			if !reset && step > 0 && st.BaseW > 0 {
+				s.stream.Step(st.BaseW, st.BaseH, fps) // другой режим - другие ступени, начинаем с полной
+			}
+			step, low, high, detail = 0, 0, 0, det
+			hist = hist[:0]
+		}
 		if st.BaseW == 0 {
 			continue
 		}
-		bpp := func(k float64) float64 {
-			w, h := float64(st.BaseW)*k, float64(st.BaseH)*k
-			return float64(kbps) * 1000 / (w * h * float64(fps))
+		rungs := motionRungs
+		if detail {
+			rungs = detailRungs
 		}
-		if bpp(ladderSteps[step]) < bppLow {
-			low++
-		} else {
-			low = 0
+		hist = append(hist, float64(kbps))
+		if len(hist) > ladderAvg {
+			hist = hist[1:]
 		}
-		if step > 0 && bpp(ladderSteps[step-1]) > bppHigh {
-			high++
-		} else {
-			high = 0
+		avg := 0.0
+		for _, v := range hist {
+			avg += v
 		}
-		next := step
-		switch {
-		case low >= downSecs && step+1 < len(ladderSteps) && !below720(st.BaseW, st.BaseH, ladderSteps[step+1]):
-			next = step + 1
-		case high >= upSecs:
-			next = step - 1
+		avg /= float64(len(hist))
+		next := ladderStep(rungs, step, st.BaseW, st.BaseH, fps, avg, float64(kbps), &low, &high)
+		if next == step {
+			continue
 		}
-		if next != step {
-			step, low, high = next, 0, 0
-			k := ladderSteps[step]
-			s.stream.Resize(int(float64(st.BaseW)*k), int(float64(st.BaseH)*k))
-		}
+		step = next
+		r := rungs[step]
+		w, h, f := int(float64(st.BaseW)*r.k), int(float64(st.BaseH)*r.k), r.fps(fps)
+		Logf("Свой захват: ступень %d: %dx%d %d к/с (кодер %.1f Мбит/с, в среднем %.1f, оценка канала %.1f)",
+			step, w&^1, h&^1, f, float64(kbps)/1000, avg/1000, float64(target)/1000)
+		s.stream.Step(w, h, f)
 	}
 }
 
@@ -299,9 +405,11 @@ func (s *Sender) SetAnswer(sdp string) error {
 
 // SetQuality - пользователь сменил качество во время трансляции: размер и
 // частота применяются сразу (кодер пересоздается), битрейт - потолок.
-func (s *Sender) SetQuality(w, h, fps, kbps int) {
+// detail - режим «Четкость» (порядок ступеней при узком канале).
+func (s *Sender) SetQuality(w, h, fps, kbps int, detail bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.detail = detail
 	if p := [3]int{w, h, fps}; w > 0 && h > 0 && fps > 0 && p != s.preset {
 		s.preset, s.fps = p, fps
 		s.stream.SetPreset(w, h, fps)

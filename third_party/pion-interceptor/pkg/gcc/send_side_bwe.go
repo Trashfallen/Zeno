@@ -232,6 +232,7 @@ func (e *SendSideBWE) WriteRTCP(pkts []rtcp.Packet, _ interceptor.Attributes) er
 		}
 
 		e.lossController.updateLossEstimate(acks)
+		e.delayController.updateLoss(e.lossController.loss()) // Zeno
 		e.delayController.updateDelayEstimate(acks)
 	}
 
@@ -260,6 +261,10 @@ func (e *SendSideBWE) GetStats() map[string]any {
 		"delayThreshold":     float64(e.latestStats.Threshold.Microseconds()) / 1000.0,
 		"usage":              e.latestStats.Usage.String(),
 		"state":              e.latestStats.State.String(),
+		// Zeno
+		"rtt":        e.delayController.rtt().Milliseconds(),
+		"lastCut":    e.delayController.cutReason(),
+		"recoveries": e.delayController.recoveryCount(),
 	}
 }
 

@@ -2,6 +2,7 @@ package nativecap
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ type Options struct {
 	FPS     int
 	Kbps    int
 	Cursor  bool
+	Detail  bool // режим «Четкость»: при узком канале сначала снижать частоту, потом размер
 }
 
 // Frame - сжатый кадр H.264 (Annex B).
@@ -33,6 +35,7 @@ type Stats struct {
 	Skipped          int64 // кадров пропущено, потому что кодер был занят
 	Bytes            int64
 	BaseW, BaseH     int     // размер картинки без снижения
+	FPS, BaseFPS     int     // частота кадров сейчас и выбранная
 	HDR              bool    // источник в HDR, переводим в обычный диапазон
 	WhiteNit         float64 // белый SDR у отправителя
 }
@@ -47,6 +50,7 @@ type Stream struct {
 	kbpsReq atomic.Int32
 	sizeReq atomic.Uint64 // w<<32 | h
 	presReq atomic.Pointer[preset]
+	stepReq atomic.Pointer[preset] // ступень при узком канале: размер и частота
 
 	mu      sync.Mutex
 	stats   Stats
@@ -134,6 +138,12 @@ type preset struct{ w, h, fps int }
 // размера и частота кадров. Кодер пересоздается, трансляция не прерывается.
 func (s *Stream) SetPreset(maxW, maxH, fps int) { s.presReq.Store(&preset{maxW, maxH, fps}) }
 
+// Step - ступень при узком канале: размер картинки и частота кадров сразу,
+// кодер пересоздается один раз.
+func (s *Stream) Step(w, h, fps int) {
+	s.stepReq.Store(&preset{int(even(w)), int(even(h)), fps})
+}
+
 // Resize меняет размер картинки: кодер пересоздается, первый кадр - ключевой.
 func (s *Stream) Resize(w, h int) { s.sizeReq.Store(uint64(even(w))<<32 | uint64(even(h))) }
 
@@ -197,8 +207,12 @@ func (s *Stream) run(started chan<- error) {
 	frameDur := time.Second / time.Duration(fps)
 	kbps := uint32(s.opts.Kbps)
 	var lastOut time.Time // последний кадр из кодера (для сторожа)
+	// для журнала сторожа: что было с входом кодера после последнего выхода
+	var inputs, convErrs, inErrs int
+	var lastErr error
 	onOut := func(data []byte, key bool, ts int64) {
 		lastOut = time.Now()
+		inputs, convErrs, inErrs, lastErr = 0, 0, 0, nil
 		s.mu.Lock()
 		s.stats.Frames++
 		s.stats.Bytes += int64(len(data))
@@ -227,7 +241,7 @@ func (s *Stream) run(started chan<- error) {
 		}
 		lastOut = time.Now()
 		s.mu.Lock()
-		s.stats.Encoder, s.stats.W, s.stats.H = enc.Name, int(w), int(h)
+		s.stats.Encoder, s.stats.W, s.stats.H, s.stats.FPS = enc.Name, int(w), int(h), int(fps)
 		s.mu.Unlock()
 		return nil
 	}
@@ -244,7 +258,7 @@ func (s *Stream) run(started chan<- error) {
 		return
 	}
 	s.mu.Lock()
-	s.stats.BaseW, s.stats.BaseH = int(ow), int(oh)
+	s.stats.BaseW, s.stats.BaseH, s.stats.BaseFPS = int(ow), int(oh), int(fps)
 	s.mu.Unlock()
 	started <- nil
 
@@ -258,6 +272,12 @@ func (s *Stream) run(started chan<- error) {
 	// третий (55 к/с). По расписанию в среднем выходит ровно fps.
 	fd := int64(frameDur / 100)
 	sch := schedule{fd: fd}
+	setFPS := func(v int) {
+		fps = uint32(v)
+		frameDur = time.Second / time.Duration(fps)
+		fd = int64(frameDur / 100)
+		sch = schedule{fd: fd}
+	}
 	var fresh bool
 	var freshTS, firstTS, lastTS int64 // время захвата, единицы 100 нс
 	var lastEnc time.Time
@@ -281,11 +301,18 @@ func (s *Stream) run(started chan<- error) {
 			s.mu.Lock()
 			w, h := uint32(s.stats.W), uint32(s.stats.H)
 			s.mu.Unlock()
-			Logf("Свой захват: кодер молчит %.0f с (просит вход: %v) - пересоздаю", now.Sub(lastOut).Seconds(), enc.ready())
+			why := ""
+			if lastErr != nil {
+				why = fmt.Sprintf(", последняя ошибка: %v", lastErr)
+			}
+			Logf("Свой захват: кодер молчит %.0f с (просит вход: %v; с последнего выхода кадров на вход %d, последний %.1f с назад, ошибок преобразования %d, входа %d; ждет кадр: %v, до срока %.0f мс%s) - пересоздаю",
+				now.Sub(lastOut).Seconds(), enc.ready(), inputs, now.Sub(lastEnc).Seconds(), convErrs, inErrs,
+				fresh, float64(sch.next-sch.fd/4-freshTS)/1e4, why)
 			if err := build(w, h); err != nil {
 				s.fail("кодер не пересоздался", err)
 				return
 			}
+			sch = schedule{fd: fd} // расписание тоже заново - вдруг встало оно
 			s.keyReq.Store(true)
 		}
 		_, err := c.grab(func(tex com, w, h, tw, th uint32, t int64) {
@@ -317,20 +344,27 @@ func (s *Stream) run(started chan<- error) {
 		}
 		if p := s.presReq.Swap(nil); p != nil {
 			if p.fps > 0 {
-				fps = uint32(p.fps)
-				frameDur = time.Second / time.Duration(fps)
-				fd = int64(frameDur / 100)
-				sch = schedule{fd: fd}
+				setFPS(p.fps)
 			}
 			ow, oh = fit(int(c.size.W), int(c.size.H), p.w, p.h)
 			s.sizeReq.Store(0) // ступень от прошлого качества больше не нужна
+			s.stepReq.Store(nil)
 			if err := build(ow, oh); err != nil {
 				s.fail("смена качества", err)
 				return
 			}
 			s.mu.Lock()
-			s.stats.BaseW, s.stats.BaseH = int(ow), int(oh)
+			s.stats.BaseW, s.stats.BaseH, s.stats.BaseFPS = int(ow), int(oh), int(fps)
 			s.mu.Unlock()
+		}
+		if p := s.stepReq.Swap(nil); p != nil {
+			if p.fps > 0 {
+				setFPS(p.fps)
+			}
+			if err := build(uint32(p.w), uint32(p.h)); err != nil {
+				s.fail("смена ступени", err)
+				return
+			}
 		}
 		if r := s.sizeReq.Swap(0); r != 0 {
 			if err := build(uint32(r>>32), uint32(r)); err != nil {
@@ -344,6 +378,9 @@ func (s *Stream) run(started chan<- error) {
 		}
 		now := time.Now()
 		repeat := !fresh && !lastEnc.IsZero() && now.Sub(lastEnc) > 500*time.Millisecond
+		if fresh && sch.next-freshTS > int64(time.Second/100) {
+			sch = schedule{fd: fd} // метки захвата ушли назад больше чем на 1 с - иначе расписание ждало бы их вечно
+		}
 		onTime := fresh && (lastEnc.IsZero() || sch.due(freshTS))
 		if (onTime || repeat) && enc.ready() {
 			if s.keyReq.Swap(false) {
@@ -356,7 +393,15 @@ func (s *Stream) run(started chan<- error) {
 			if ts <= lastTS {
 				ts = lastTS + 1
 			}
-			if tex, err := conv.convert(); err == nil && enc.input(tex, ts, fd) == nil {
+			tex, err := conv.convert()
+			if err != nil {
+				convErrs++
+				lastErr = err
+			} else if err = enc.input(tex, ts, fd); err != nil {
+				inErrs++
+				lastErr = err
+			} else {
+				inputs++
 				fresh, lastEnc, lastTS = false, now, ts
 				sch.sent(ts)
 			}
